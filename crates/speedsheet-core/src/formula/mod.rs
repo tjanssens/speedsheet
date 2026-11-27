@@ -199,8 +199,7 @@ impl Context for Recalc<'_> {
         let wb = self.wb;
         let Some(sh) = wb.sheets.get(rng.sheet) else { return };
         let r_end = (rng.r1 as usize + 1).min(sh.rows.len());
-        for r in rng.r0 as usize..r_end {
-            let row = &sh.rows[r];
+        for (r, row) in sh.rows.iter().enumerate().take(r_end).skip(rng.r0 as usize) {
             let c_end = (rng.c1 as usize + 1).min(row.len());
             for (c, cell) in row.iter().enumerate().take(c_end).skip(rng.c0 as usize) {
                 match cell {
