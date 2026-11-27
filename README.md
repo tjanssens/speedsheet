@@ -86,7 +86,7 @@ git tag v0.2.0 && git push origin v0.2.0
 ```
 
 The **Release** workflow builds installers for Windows (`.msi`, `.exe`), macOS (Apple Silicon and
-Intel `.dmg`) and Linux (`.AppImage`, `.deb`, `.rpm`) and attaches them to a draft GitHub release.
+Intel `.dmg`) and Linux (`.AppImage`, `.deb`, `.rpm`) and attaches them to a GitHub release, which is published once all builds succeed.
 Builds are not code-signed yet, so Windows SmartScreen and macOS Gatekeeper will warn on first launch.
 
 ## Automatic updates
@@ -100,7 +100,7 @@ so releases must be signed. One-time setup:
    - Secret `TAURI_SIGNING_PRIVATE_KEY`: contents of `~/.tauri/speedsheet.key`
    - Secret `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: the password
    - Variable `UPDATER_PUBKEY`: contents of `~/.tauri/speedsheet.key.pub`
-3. Publish the draft release after the Release workflow finishes: the app only sees published releases.
+3. Releases publish themselves once all builds succeed (the app only sees published releases).
 
 Without these settings releases still build, just without the update channel.
 

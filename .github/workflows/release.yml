@@ -1,7 +1,9 @@
 name: Release
 
 # Push a tag like v0.2.0 (or run manually) to build installers for Windows, macOS and Linux.
-# The result is a draft GitHub release with the installers attached; publish it when happy.
+# The installers are attached to a draft release, which is published once every build has
+# succeeded (the app's updater only sees published releases). If a build fails, the draft stays;
+# re-run the failed job and the release is published after it.
 on:
   push:
     tags: ["v*"]
@@ -82,3 +84,17 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }} ${{ env.UPDATER_ARGS }}
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish the draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="v$(node -p 'require("./package.json").version')"
+          gh release edit "$tag" --draft=false --latest --target "$GITHUB_SHA"
+          echo "Published $tag"
