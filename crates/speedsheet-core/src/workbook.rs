@@ -8,6 +8,7 @@ use serde::Serialize;
 use crate::filter::{compute_view, contains_ci, Filter};
 use crate::formula::parser::shift_formula;
 use crate::formula::{self, DepIndex, Pos};
+use crate::layout::Area;
 use crate::sheet::{Cell, Sheet};
 use crate::style::CellStyle;
 use crate::value::Value;
@@ -259,7 +260,11 @@ impl Workbook {
             }
         }
         let first = flat.first().map(|c| (c.0 as usize, c.1 as usize)).unwrap_or((view_row, col));
+        let last_row = flat.iter().map(|c| c.0 as usize).max();
         let (changes, n) = self.write_cells(sheet, flat);
+        if let Some(r) = last_row {
+            self.sheets[sheet].grow_autofilter(r);
+        }
         if !changes.is_empty() {
             self.push_undo(Action::Cells { sheet, changes, styles: Vec::new() });
         }
@@ -380,7 +385,7 @@ impl Workbook {
     pub fn sort(&mut self, sheet: usize, col: usize, ascending: bool, header: bool) -> Result<Change> {
         let sh = self.sheet_checked(sheet)?;
         let start = sh.data_start(header);
-        let n = sh.row_count().saturating_sub(start);
+        let n = sh.data_end().saturating_sub(start);
         if n < 2 {
             return Ok(Change { sheet, ..Default::default() });
         }
@@ -467,6 +472,18 @@ impl Workbook {
             }
         }
         Ok(sh.view_len())
+    }
+
+    /// Turn the filter buttons on for `area` (its first row holds the headers) or off. Turning
+    /// them off also clears any active filter, like Excel's Data > Filter.
+    pub fn set_autofilter(&mut self, sheet: usize, area: Option<Area>) -> Result<()> {
+        self.sheet_checked(sheet)?;
+        let sh = &mut self.sheets[sheet];
+        sh.filter = None;
+        sh.view = None;
+        sh.autofilter = area;
+        self.modified = true;
+        Ok(())
     }
 
     /// Re-apply the current filter (after sort/undo).

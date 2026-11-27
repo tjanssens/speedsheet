@@ -130,8 +130,9 @@ pub fn compute_view(sheet: &Sheet, filter: &Filter) -> Vec<u32> {
     let compiled: Vec<(usize, Compiled)> = filter.conds.iter().map(|c| (c.col, compile(&c.op))).collect();
     let mut out = Vec::with_capacity(sheet.row_count());
     let start = sheet.data_start(filter.header);
+    let end = sheet.data_end();
     for r in 0..sheet.row_count() {
-        if r < start || compiled.iter().all(|(c, m)| m.matches(sheet.value(r, *c))) {
+        if r < start || r >= end || compiled.iter().all(|(c, m)| m.matches(sheet.value(r, *c))) {
             out.push(r as u32);
         }
     }
@@ -148,7 +149,7 @@ pub fn column_values(sheet: &Sheet, col: usize, header: bool, limit: usize) -> (
         .unwrap_or_default();
     let mut counts: HashMap<String, usize> = HashMap::new();
     let start = sheet.data_start(header);
-    for r in start..sheet.row_count() {
+    for r in start..sheet.data_end().max(start) {
         if others.iter().all(|(c, m)| m.matches(sheet.value(r, *c))) {
             *counts.entry(sheet.value(r, col).display()).or_default() += 1;
         }

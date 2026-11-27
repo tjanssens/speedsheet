@@ -5,6 +5,8 @@ edit it, save it. Built to stay smooth with hundreds of thousands of rows.
 
 - Opens `.xlsx`, `.xlsm`, `.xls`, `.xlsb`, `.ods`, `.csv`/`.tsv`; saves `.xlsx` and `.csv`
 - Multiple sheets, formulas (90+ common functions), sort, filter, find, undo/redo
+- Filter buttons like Excel: *Filter* (Ctrl+Shift+L) puts them on the header row of the list
+  around the active cell, or on the selected rows; rows below the list (totals) stay put
 - Copy/paste with Excel, Google Sheets, Numbers and other apps (formulas move along when copied inside SpeedSheet)
 - Excel formatting is shown and kept on save: fonts, bold/italic, colours, fills, borders,
   alignment and wrapping, number formats, column widths and row heights, merged cells, frozen

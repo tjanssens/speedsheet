@@ -889,6 +889,23 @@ function cmdFilter() {
   openFilterFor(col, host.left + Math.max(r.x, 0) + Math.min(r.w, 200) - 18, host.top + 24);
 }
 
+/** Excel's Data > Filter (Ctrl+Shift+L): put filter buttons on the header row of the list
+ * around the active cell (or of the selection), or take them off again. */
+async function cmdToggleFilter() {
+  const sel = grid.selection;
+  const had = !!grid.autofilter;
+  try {
+    const info = await call<BookInfo>("toggle_autofilter", { sheet, r0: sel.r0, c0: sel.c0, r1: sel.r1, c1: sel.c1 });
+    grid.dropCache();
+    grid.showFilterButtons = false;
+    applyInfo(info);
+    await loadLayout(true);
+    toast(had ? "Filter removed" : "Filter buttons added to the header row", 1800);
+  } catch (e) {
+    showError(e, "Can't set the filter");
+  }
+}
+
 grid.onColResize = (col, width) => {
   // Keep the local copy in step, so the next refresh doesn't snap the column back.
   const widths = curSheet().colWidths;
@@ -1111,6 +1128,9 @@ document.addEventListener("keydown", (e) => {
       return run(cmdPrint);
     case "f":
       return run(openFind);
+    case "l":
+      if (inText || !e.shiftKey) return;
+      return run(cmdToggleFilter);
     case "z":
       if (inText) return;
       return run(() => cmdUndo(e.shiftKey));
@@ -1143,7 +1163,7 @@ const commands: Record<string, () => unknown> = {
   redo: () => cmdUndo(true),
   sortAsc: () => cmdSort(true),
   sortDesc: () => cmdSort(false),
-  filter: cmdFilter,
+  filter: cmdToggleFilter,
   clearFilters: async () => {
     try {
       let info = book;

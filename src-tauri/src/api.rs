@@ -375,6 +375,38 @@ pub fn dispatch(wb: &mut Workbook, cmd: &str, a: Json) -> Result<Json, String> {
             wb.modified = true;
             ok(())
         }
+        "toggle_autofilter" => {
+            // Excel's Data > Filter: turn the filter buttons off, or on for the selection (when it
+            // spans several rows) or else the block of filled cells around the active cell.
+            #[derive(Deserialize)]
+            struct A {
+                sheet: usize,
+                r0: usize,
+                c0: usize,
+                r1: usize,
+                c1: usize,
+            }
+            let A { sheet, r0, c0, r1, c1 } = args(a)?;
+            sheet_ok(wb, sheet)?;
+            let sh = &wb.sheets[sheet];
+            let area = if sh.autofilter.is_some() {
+                None
+            } else {
+                let d0 = sh.data_row(r0).ok_or("no such row")?;
+                let d1 = sh.data_row(r1).unwrap_or(d0);
+                Some(if d1 > d0 {
+                    speedsheet_core::layout::Area { r0: d0 as u32, c0: c0 as u32, r1: d1 as u32, c1: c1 as u32 }
+                } else {
+                    let mut a = sh.current_region(d0, c0);
+                    if c1 > c0 {
+                        (a.c0, a.c1) = (c0 as u32, c1 as u32);
+                    }
+                    a
+                })
+            };
+            wb.set_autofilter(sheet, area).map_err(e)?;
+            ok(info(wb))
+        }
         "set_row_height" => {
             #[derive(Deserialize)]
             struct A {
