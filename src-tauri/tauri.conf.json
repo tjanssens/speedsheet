@@ -1,0 +1,88 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "SpeedSheet",
+  "version": "../package.json",
+  "identifier": "io.github.tjanssens.speedsheet",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "SpeedSheet",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 640,
+        "minHeight": 400,
+        "dragDropEnabled": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "Productivity",
+    "shortDescription": "Fast, lightweight spreadsheet editor",
+    "longDescription": "SpeedSheet opens and edits Excel (.xlsx, .xls) and CSV files, fast, even with hundreds of thousands of rows.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "fileAssociations": [
+      {
+        "ext": [
+          "xlsx",
+          "xlsm"
+        ],
+        "name": "Excel Workbook",
+        "role": "Editor",
+        "mimeType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      },
+      {
+        "ext": [
+          "xls"
+        ],
+        "name": "Excel 97-2003 Workbook",
+        "role": "Editor",
+        "mimeType": "application/vnd.ms-excel"
+      },
+      {
+        "ext": [
+          "csv"
+        ],
+        "name": "CSV File",
+        "role": "Editor",
+        "mimeType": "text/csv"
+      },
+      {
+        "ext": [
+          "ods"
+        ],
+        "name": "OpenDocument Spreadsheet",
+        "role": "Viewer",
+        "mimeType": "application/vnd.oasis.opendocument.spreadsheet"
+      }
+    ]
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/tjanssens/speedsheet/releases/latest/download/latest.json"
+      ],
+      "pubkey": "",
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

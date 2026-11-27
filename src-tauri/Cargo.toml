@@ -1,0 +1,29 @@
+[package]
+name = "speedsheet"
+description = "SpeedSheet: a fast, lightweight spreadsheet editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "speedsheet_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+speedsheet-core = { path = "../crates/speedsheet-core" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-os = "2"
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "3", features = ["json"] }
+
+[dev-dependencies]
+tiny_http = "0.12"

@@ -1,0 +1,84 @@
+name: Release
+
+# Push a tag like v0.2.0 (or run manually) to build installers for Windows, macOS and Linux.
+# The result is a draft GitHub release with the installers attached; publish it when happy.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS Apple Silicon
+            platform: macos-latest
+            args: --target aarch64-apple-darwin
+            target: aarch64-apple-darwin
+          - name: macOS Intel
+            platform: macos-latest
+            args: --target x86_64-apple-darwin
+            target: x86_64-apple-darwin
+          - name: Linux
+            platform: ubuntu-22.04
+            args: ""
+            target: ""
+          - name: Windows
+            platform: windows-latest
+            args: ""
+            target: ""
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # Auto-update: when the UPDATER_PUBKEY variable and TAURI_SIGNING_PRIVATE_KEY secret are set
+      # (see README), builds are signed for the updater and a latest.json is published.
+      - name: Enable updater signing
+        if: vars.UPDATER_PUBKEY != ''
+        shell: bash
+        env:
+          PUBKEY: ${{ vars.UPDATER_PUBKEY }}
+        run: |
+          node -e 'require("fs").writeFileSync("src-tauri/tauri.updater.conf.json", JSON.stringify({bundle:{createUpdaterArtifacts:true},plugins:{updater:{pubkey:process.env.PUBKEY}}}))'
+          echo "UPDATER_ARGS=--config src-tauri/tauri.updater.conf.json" >> "$GITHUB_ENV"
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Where the in-app feedback button sends reports (see feedback-worker/README.md).
+          # Set it under Settings > Secrets and variables > Actions > Variables.
+          SPEEDSHEET_FEEDBACK_URL: ${{ vars.FEEDBACK_URL }}
+        with:
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('v__VERSION__-{0}', github.run_number) }}
+          releaseName: SpeedSheet v__VERSION__
+          releaseBody: |
+            Download the installer for your system below.
+
+            - **Windows**: `.msi` or `-setup.exe`
+            - **macOS**: `.dmg` (`aarch64` for Apple Silicon, `x64` for Intel). The app is not notarized yet: the first time, right-click the app and choose Open.
+            - **Linux**: `.AppImage`, `.deb` or `.rpm`
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }} ${{ env.UPDATER_ARGS }}
