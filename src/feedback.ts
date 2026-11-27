@@ -30,7 +30,7 @@ async function openUrl(url: string) {
 
 export function issueUrl(repo: string, message: string, meta: string) {
   const firstLine = message.trim().split("\n")[0].slice(0, 80) || "Feedback";
-  const body = `${message.trim()}\n\n---\n${meta}`;
+  const body = `${message.trim()}\n\n---\n${meta}\n\n<!-- speedsheet-feedback -->`;
   const q = new URLSearchParams({ title: `Feedback: ${firstLine}`, body, labels: "feedback" });
   return `https://github.com/${repo}/issues/new?${q.toString()}`;
 }

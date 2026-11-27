@@ -61,6 +61,7 @@ export default {
       contact ? `**Contact:** ${contact}` : null,
       "",
       "_Sent from the in-app feedback button._",
+      "<!-- speedsheet-feedback -->",
     ]
       .filter((l) => l !== null)
       .join("\n");
