@@ -61,6 +61,61 @@ export interface Block {
   cols: number;
   text: string[];
   kinds: number[];
+  /** Style id per cell (index into Styles.styles). */
+  styles: number[];
+  /** Conditional format per cell: 0 none, else dxf index + 1. */
+  cf?: number[];
+}
+
+export type LineStyle =
+  | "thin" | "medium" | "thick" | "double" | "hair" | "dashed" | "dotted" | "mediumDashed"
+  | "dashDot" | "mediumDashDot" | "dashDotDot" | "mediumDashDotDot" | "slantDashDot";
+
+export interface BorderLine {
+  style: LineStyle;
+  color: number;
+}
+
+export interface CellStyle {
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strike?: boolean;
+  fontName?: string;
+  fontSize?: number;
+  color?: number;
+  fill?: number;
+  hAlign: "general" | "left" | "center" | "right" | "justify" | "fill" | "centeracross" | "distributed";
+  vAlign: "bottom" | "center" | "top" | "justify" | "distributed";
+  wrap?: boolean;
+  indent?: number;
+  numFmt?: string;
+  /** left, right, top, bottom */
+  borders: (BorderLine | null)[];
+}
+
+export interface Styles {
+  styles: CellStyle[];
+  dxfs: CellStyle[];
+}
+
+export interface Area {
+  r0: number;
+  c0: number;
+  r1: number;
+  c1: number;
+}
+
+export interface Layout {
+  /** Runs of [first view row, count, height px]. */
+  rowHeights: [number, number, number][];
+  defaultRowHeight: number | null;
+  defaultColWidth: number | null;
+  merges: Area[];
+  /** [rows, cols] frozen at the top/left. */
+  freeze: [number, number] | null;
+  autofilter: { row: number; dataRow: number; c0: number; c1: number } | null;
+  hideGrid: boolean;
 }
 
 export interface EditResult {

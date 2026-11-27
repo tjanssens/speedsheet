@@ -3,7 +3,9 @@
 use serde::Serialize;
 
 use crate::formula::parser::shift_formula;
+use crate::layout::CfTest;
 use crate::sheet::{col_name, Cell, Sheet};
+use crate::style::CellStyle;
 use crate::value::Value;
 use crate::workbook::Workbook;
 
@@ -13,27 +15,187 @@ pub struct Block {
     /// Data row number for each view row (differs from the view row when filtered).
     pub rows: Vec<u32>,
     pub cols: u32,
-    /// Row-major display strings.
+    /// Row-major display strings (number formats applied).
     pub text: Vec<String>,
     /// Row-major kind codes: 0 empty, 1 number, 2 text, 3 bool, 4 error; +8 when the cell is a formula.
     pub kinds: Vec<u8>,
+    /// Row-major style ids (index into the workbook's styles).
+    pub styles: Vec<u16>,
+    /// Row-major conditional format: 0 none, else dxf index + 1. Omitted when the sheet has none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cf: Option<Vec<u16>>,
 }
 
-pub fn block(sheet: &Sheet, vr0: usize, vr1: usize, c0: usize, c1: usize) -> Block {
+/// Display text of a value in a given style.
+pub fn display_styled(v: &Value, style: Option<&CellStyle>) -> String {
+    match style.and_then(|s| s.number_format()) {
+        Some(code) if !v.is_empty() => crate::numfmt::format_value(v, code),
+        _ => v.display(),
+    }
+}
+
+pub fn block(wb: &Workbook, sheet: usize, vr0: usize, vr1: usize, c0: usize, c1: usize) -> Block {
+    let sh = &wb.sheets[sheet];
     let cols = c1.saturating_sub(c0) + 1;
-    let mut out = Block { rows: Vec::new(), cols: cols as u32, text: Vec::new(), kinds: Vec::new() };
-    for vr in vr0..=vr1 {
-        let Some(r) = sheet.data_row(vr) else { break };
+    let mut out =
+        Block { rows: Vec::new(), cols: cols as u32, text: Vec::new(), kinds: Vec::new(), styles: Vec::new(), cf: None };
+    let rules = CompiledCf::new(wb, sheet, vr0, vr1, c0, c1);
+    let mut cf = Vec::new();
+    let (nrows, _) = sh.extent();
+    let last = if sh.view.is_some() { vr1 } else { vr1.min(nrows.max(vr0 + 1) - 1) };
+    for vr in vr0..=last {
+        let Some(r) = sh.data_row(vr) else { break };
         out.rows.push(r as u32);
-        let row = sheet.rows.get(r);
+        let row = sh.rows.get(r);
+        let srow = sh.styles.get(r);
         for c in c0..c0 + cols {
             let cell = row.and_then(|x| x.get(c)).unwrap_or(&Cell::Empty);
+            let sid = srow.and_then(|x| x.get(c)).copied().unwrap_or(0);
             let v = cell.value();
-            out.text.push(v.display());
+            out.text.push(display_styled(v, wb.styles.get(sid as usize)));
             out.kinds.push(v.kind() | if matches!(cell, Cell::Formula(_)) { 8 } else { 0 });
+            out.styles.push(sid);
+            if !rules.is_empty() {
+                cf.push(rules.eval(r as u32, c as u32, v));
+            }
         }
     }
+    if !rules.is_empty() {
+        out.cf = Some(cf);
+    }
     out
+}
+
+enum Operand {
+    Num(f64),
+    Text(String),
+}
+
+struct Rule<'a> {
+    areas: &'a [crate::layout::Area],
+    test: &'a CfTest,
+    a: Option<Operand>,
+    b: Option<Operand>,
+    dxf: u16,
+    stop: bool,
+}
+
+/// Conditional format rules that touch a block, with constant operands evaluated once.
+struct CompiledCf<'a> {
+    rules: Vec<Rule<'a>>,
+}
+
+impl<'a> CompiledCf<'a> {
+    fn new(wb: &'a Workbook, sheet: usize, vr0: usize, vr1: usize, c0: usize, c1: usize) -> CompiledCf<'a> {
+        let sh = &wb.sheets[sheet];
+        let mut rules = Vec::new();
+        if sh.cond.is_empty() {
+            return CompiledCf { rules };
+        }
+        // Data rows of the block (the view may reorder them, so use the bounding box).
+        let (mut lo, mut hi) = (u32::MAX, 0u32);
+        for vr in vr0..=vr1 {
+            if let Some(r) = sh.data_row(vr) {
+                lo = lo.min(r as u32);
+                hi = hi.max(r as u32);
+            } else {
+                break;
+            }
+        }
+        let operand = |src: &str| -> Option<Operand> {
+            let src = src.trim();
+            if let Some(t) = src.strip_prefix('"').and_then(|t| t.strip_suffix('"')) {
+                return Some(Operand::Text(t.replace("\"\"", "\"")));
+            }
+            if let Ok(n) = src.parse::<f64>() {
+                return Some(Operand::Num(n));
+            }
+            match wb.evaluate(sheet, src) {
+                Value::Number(n) | Value::Date(n) => Some(Operand::Num(n)),
+                Value::Text(t) => Some(Operand::Text(t.to_string())),
+                _ => None,
+            }
+        };
+        for cfm in &sh.cond {
+            let touches = cfm.areas.iter().any(|a| a.r1 >= lo && a.r0 <= hi && a.c1 as usize >= c0 && a.c0 as usize <= c1);
+            if !touches {
+                continue;
+            }
+            for rule in &cfm.rules {
+                let (a, b) = match &rule.test {
+                    CfTest::Cell { a, b, .. } => (operand(a), b.as_deref().and_then(operand)),
+                    _ => (None, None),
+                };
+                if matches!(rule.test, CfTest::Cell { .. }) && a.is_none() {
+                    continue;
+                }
+                rules.push(Rule { areas: &cfm.areas, test: &rule.test, a, b, dxf: rule.dxf as u16 + 1, stop: rule.stop });
+            }
+        }
+        CompiledCf { rules }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.rules.is_empty()
+    }
+
+    fn eval(&self, r: u32, c: u32, v: &Value) -> u16 {
+        for rule in &self.rules {
+            if !rule.areas.iter().any(|a| a.contains(r, c)) {
+                continue;
+            }
+            if rule_matches(rule, v) {
+                return rule.dxf;
+            }
+            if rule.stop {
+                return 0;
+            }
+        }
+        0
+    }
+}
+
+fn rule_matches(rule: &Rule, v: &Value) -> bool {
+    use std::cmp::Ordering::*;
+    let text = || v.display().to_lowercase();
+    match rule.test {
+        CfTest::Blank => v.is_empty() || matches!(v, Value::Text(t) if t.trim().is_empty()),
+        CfTest::NotBlank => !(v.is_empty() || matches!(v, Value::Text(t) if t.trim().is_empty())),
+        CfTest::ContainsText { text: t } => text().contains(&t.to_lowercase()),
+        CfTest::NotContainsText { text: t } => !text().contains(&t.to_lowercase()),
+        CfTest::BeginsWith { text: t } => text().starts_with(&t.to_lowercase()),
+        CfTest::EndsWith { text: t } => text().ends_with(&t.to_lowercase()),
+        CfTest::Cell { op, .. } => {
+            let cmp = |o: &Option<Operand>| -> Option<std::cmp::Ordering> {
+                match (o.as_ref()?, v) {
+                    (Operand::Num(n), Value::Number(x) | Value::Date(x)) => x.partial_cmp(n),
+                    (Operand::Num(n), Value::Empty) => 0f64.partial_cmp(n),
+                    (Operand::Text(t), Value::Text(x)) => Some(crate::value::compare_text(x, t)),
+                    (Operand::Text(t), Value::Empty) => Some(crate::value::compare_text("", t)),
+                    // Text sorts after numbers in Excel comparisons.
+                    (Operand::Num(_), Value::Text(_)) => Some(Greater),
+                    (Operand::Text(_), Value::Number(_) | Value::Date(_)) => Some(Less),
+                    _ => None,
+                }
+            };
+            let Some(a) = cmp(&rule.a) else { return false };
+            match op.as_str() {
+                "eq" => a == Equal,
+                "ne" => a != Equal,
+                "gt" => a == Greater,
+                "ge" => a != Less,
+                "lt" => a == Less,
+                "le" => a != Greater,
+                "between" | "notBetween" => {
+                    let Some(b) = cmp(&rule.b) else { return false };
+                    // Excel accepts the bounds in either order.
+                    let inside = (a != Less && b != Greater) || (a != Greater && b != Less);
+                    inside == (op == "between")
+                }
+                _ => false,
+            }
+        }
+    }
 }
 
 /// Heuristic: the first row is a header if all its filled cells are text and there is more data
@@ -87,7 +249,9 @@ pub struct Copied {
     pub inputs: Vec<Vec<String>>,
 }
 
-pub fn copy(sheet: &Sheet, vr0: usize, c0: usize, vr1: usize, c1: usize) -> Copied {
+pub fn copy(wb: &Workbook, sheet: usize, vr0: usize, c0: usize, vr1: usize, c1: usize) -> Copied {
+    let styles = &wb.styles;
+    let sheet = &wb.sheets[sheet];
     let mut tsv = String::new();
     let mut html = String::from("<table>");
     let mut inputs = Vec::new();
@@ -97,7 +261,8 @@ pub fn copy(sheet: &Sheet, vr0: usize, c0: usize, vr1: usize, c1: usize) -> Copi
         html.push_str("<tr>");
         for c in c0..=c1 {
             let cell = r.map(|r| sheet.cell(r, c)).unwrap_or(&Cell::Empty);
-            let shown = cell.value().display();
+            let style = r.and_then(|r| styles.get(sheet.style_id(r, c) as usize));
+            let shown = display_styled(cell.value(), style);
             if c > c0 {
                 tsv.push('\t');
             }
@@ -193,16 +358,50 @@ pub fn print_html(
         html.push_str(&format!("<tr><th>{}</th>", r + 1));
         for c in c0..=c1 {
             let v = sh.value(r, c);
+            let style = wb.styles.get(sh.style_id(r, c) as usize);
             let cls = match v {
                 Value::Number(_) | Value::Date(_) => " class=\"n\"",
                 _ => "",
             };
-            html.push_str(&format!("<td{}>{}</td>", cls, escape_html(&v.display())));
+            let css = style.map(print_css).unwrap_or_default();
+            let attr = if css.is_empty() { String::new() } else { format!(" style=\"{}\"", css) };
+            html.push_str(&format!("<td{}{}>{}</td>", cls, attr, escape_html(&display_styled(v, style))));
         }
         html.push_str("</tr>");
     }
     html.push_str("</tbody></table>");
     (html, n, n < total)
+}
+
+/// Inline CSS for a style in print output.
+fn print_css(s: &CellStyle) -> String {
+    use crate::style::HAlign;
+    let mut css = String::new();
+    if s.bold {
+        css.push_str("font-weight:bold;");
+    }
+    if s.italic {
+        css.push_str("font-style:italic;");
+    }
+    if s.underline {
+        css.push_str("text-decoration:underline;");
+    }
+    if let Some(c) = s.color {
+        css.push_str(&format!("color:#{:06x};", c));
+    }
+    if let Some(c) = s.fill {
+        css.push_str(&format!("background:#{:06x};print-color-adjust:exact;-webkit-print-color-adjust:exact;", c));
+    }
+    match s.h_align {
+        HAlign::Center | HAlign::CenterAcross => css.push_str("text-align:center;"),
+        HAlign::Right => css.push_str("text-align:right;"),
+        HAlign::Left => css.push_str("text-align:left;"),
+        _ => {}
+    }
+    if s.wrap {
+        css.push_str("white-space:pre-wrap;");
+    }
+    css
 }
 
 #[cfg(test)]

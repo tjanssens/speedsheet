@@ -36,6 +36,43 @@
     color-scheme: dark;
   }
 }
+:root[data-theme="dark"] {
+  --bg: #1b1d21;
+  --panel: #23262b;
+  --panel-2: #2c3036;
+  --border: #3a3f47;
+  --grid: #30343b;
+  --text: #e7e9ec;
+  --muted: #9aa1ac;
+  --accent: #3ccf8e;
+  --accent-soft: rgba(60, 207, 142, 0.14);
+  --accent-strong: rgba(60, 207, 142, 0.26);
+  --header-bg: #25282d;
+  --header-active: #1f3b30;
+  --error: #ff7b72;
+  --filtered: #79b8ff;
+  --shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+  color-scheme: dark;
+}
+/* "Light sheet": the cell area stays light in a dark app, like paper. */
+#grid-host.light-sheet {
+  --bg: #ffffff;
+  --panel: #f6f7f9;
+  --panel-2: #eceef2;
+  --border: #d9dce3;
+  --grid: #e3e6ec;
+  --text: #1c1f24;
+  --muted: #6a717d;
+  --accent: #157f54;
+  --accent-soft: rgba(21, 127, 84, 0.12);
+  --accent-strong: rgba(21, 127, 84, 0.22);
+  --header-bg: #f3f4f7;
+  --header-active: #dcefe5;
+  --error: #c62828;
+  --filtered: #1565c0;
+  --shadow: 0 8px 28px rgba(15, 20, 30, 0.18);
+  color-scheme: light;
+}
 
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; overflow: hidden; }

@@ -129,8 +129,9 @@ pub fn contains_ci(hay: &str, needle: &str) -> bool {
 pub fn compute_view(sheet: &Sheet, filter: &Filter) -> Vec<u32> {
     let compiled: Vec<(usize, Compiled)> = filter.conds.iter().map(|c| (c.col, compile(&c.op))).collect();
     let mut out = Vec::with_capacity(sheet.row_count());
+    let start = sheet.data_start(filter.header);
     for r in 0..sheet.row_count() {
-        if (filter.header && r == 0) || compiled.iter().all(|(c, m)| m.matches(sheet.value(r, *c))) {
+        if r < start || compiled.iter().all(|(c, m)| m.matches(sheet.value(r, *c))) {
             out.push(r as u32);
         }
     }
@@ -146,7 +147,7 @@ pub fn column_values(sheet: &Sheet, col: usize, header: bool, limit: usize) -> (
         .map(|f| f.conds.iter().filter(|c| c.col != col).map(|c| (c.col, compile(&c.op))).collect())
         .unwrap_or_default();
     let mut counts: HashMap<String, usize> = HashMap::new();
-    let start = if header { 1 } else { 0 };
+    let start = sheet.data_start(header);
     for r in start..sheet.row_count() {
         if others.iter().all(|(c, m)| m.matches(sheet.value(r, *c))) {
             *counts.entry(sheet.value(r, col).display()).or_default() += 1;

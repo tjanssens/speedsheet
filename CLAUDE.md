@@ -6,3 +6,4 @@
 - Checks CI runs: `cargo test -p speedsheet-core`, `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `npm run build`.
 - UI can be exercised in a browser: `cargo run --release -p speedsheet --example dev_bridge -- <file>` + `npm run dev`, then Playwright against http://localhost:1420.
 - Issues labelled `feedback` come from the in-app feedback button: reproduce with a test first, then fix.
+- Formatting: `testdata/styled-members.xlsx` (from `cargo run -p speedsheet-core --example gen_styled`) is the visual test file; compare the dev bridge UI against `soffice --headless --convert-to pdf` of it.
