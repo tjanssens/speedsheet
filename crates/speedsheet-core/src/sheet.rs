@@ -102,6 +102,10 @@ pub struct Sheet {
     pub autofilter: Option<Area>,
     pub cond: Vec<CondFormat>,
     pub hide_grid: bool,
+    /// Defined names scoped to this sheet (workbook-wide ones are in `Workbook::names`).
+    pub names: Vec<crate::workbook::DefinedName>,
+    /// VBA code name of the sheet in an .xlsm file (`Sheet1`), which macros refer to.
+    pub codename: Option<String>,
     cols_cache: usize,
 }
 

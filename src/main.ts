@@ -915,17 +915,54 @@ async function cmdOpen() {
   if (path) await openPath(path);
 }
 
+/**
+ * The opened file holds things SpeedSheet can't keep: saving over it would remove them.
+ * Ask first. Returns "copy" (save under a new name), "overwrite" or "cancel".
+ */
+async function confirmLosses(losses: string[]): Promise<"copy" | "overwrite" | "cancel"> {
+  const msg =
+    `"${book.name}" contains things SpeedSheet can't keep yet. Saving over it would remove:\n\n` +
+    losses.map((l) => `• ${l}`).join("\n") +
+    `\n\nSave a copy instead, so the original stays complete?`;
+  if (isTauri) {
+    const { message } = await import("@tauri-apps/plugin-dialog");
+    const copy = "Save a copy…";
+    const overwrite = "Overwrite";
+    const r = await message(msg, {
+      title: "Saving would remove content",
+      kind: "warning",
+      buttons: { yes: copy, no: overwrite, cancel: "Cancel" },
+    });
+    return r === copy || r === "Yes" ? "copy" : r === overwrite || r === "No" ? "overwrite" : "cancel";
+  }
+  if (confirm(msg)) return "copy";
+  return confirm(`Overwrite "${book.name}" and remove these anyway?`) ? "overwrite" : "cancel";
+}
+
+function samePath(a: string | null, b: string | null) {
+  const norm = (p: string) => p.replace(/\\/g, "/").toLowerCase();
+  return a !== null && b !== null && norm(a) === norm(b);
+}
+
 async function cmdSave(forceAs = false): Promise<boolean> {
   commitEdit(0, 0);
   let path: string | null = book.path;
+  let force = false;
+  if (!forceAs && path && book.writable && book.losses.length) {
+    const choice = await confirmLosses(book.losses);
+    if (choice === "cancel") return false;
+    if (choice === "copy") forceAs = true;
+    else force = true;
+  }
   if (forceAs || !path || !book.writable) {
     const base = (book.path ?? "Untitled").replace(/\.(xls|xlsb|ods|xlsm|xlsx|csv|tsv|txt)$/i, "");
-    const ext = book.format === "csv" ? "csv" : "xlsx";
+    const ext = book.format === "csv" ? "csv" : book.macros ? "xlsm" : "xlsx";
     if (isTauri) {
       const { save } = await import("@tauri-apps/plugin-dialog");
       path = await save({
-        defaultPath: `${base}.${ext}`,
+        defaultPath: `${base}${forceAs && book.path ? " (copy)" : ""}.${ext}`,
         filters: [
+          ...(book.macros ? [{ name: "Excel macro-enabled workbook", extensions: ["xlsm"] }] : []),
           { name: "Excel workbook", extensions: ["xlsx"] },
           { name: "CSV (current sheet)", extensions: ["csv"] },
         ],
@@ -934,10 +971,16 @@ async function cmdSave(forceAs = false): Promise<boolean> {
       path = prompt("Save as (path on the dev bridge machine):", `${base}.${ext}`);
     }
     if (!path) return false;
-    if (!/\.(xlsx|csv|tsv)$/i.test(path)) path += ".xlsx";
+    if (!/\.(xlsx|xlsm|csv|tsv)$/i.test(path)) path += ".xlsx";
+    if (!force && book.losses.length && samePath(path, book.path)) {
+      const choice = await confirmLosses(book.losses);
+      if (choice === "cancel") return false;
+      if (choice === "copy") return cmdSave(true);
+      force = true;
+    }
   }
   try {
-    const info = await busy("Saving…", () => call<BookInfo>("save_file", { path, sheet }));
+    const info = await busy("Saving…", () => call<BookInfo>("save_file", { path, sheet, force }));
     applyInfo(info);
     toast(`Saved ${escapeHtml(info.name)}`, 1800);
     return true;

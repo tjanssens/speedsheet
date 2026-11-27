@@ -2,11 +2,12 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use serde::Serialize;
 
 use crate::filter::{compute_view, contains_ci, Filter};
-use crate::formula::parser::shift_formula;
+use crate::formula::parser::{mentions_sheet, rename_sheet_in_formula, shift_formula};
 use crate::formula::{self, DepIndex, Pos};
 use crate::layout::Area;
 use crate::sheet::{Cell, Sheet};
@@ -32,6 +33,44 @@ impl FileFormat {
     }
 }
 
+/// A defined name ("named range"), like `Rate` = `Sheet1!$B$1`. Workbook-wide names live in
+/// [`Workbook::names`], names scoped to one sheet in [`Sheet::names`].
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct DefinedName {
+    pub name: String,
+    /// The definition, without the leading '='.
+    pub formula: String,
+    pub hidden: bool,
+}
+
+/// The macro project of an .xlsm file, kept as-is so saving does not drop the macros.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct VbaProject {
+    pub project: Vec<u8>,
+    pub signature: Option<Vec<u8>>,
+    /// The workbook's VBA code name (`ThisWorkbook`).
+    pub codename: Option<String>,
+}
+
+/// A formula text a sheet rename changed: where, before and after.
+#[derive(Clone, Debug)]
+enum FormulaEdit {
+    Cell {
+        sheet: u32,
+        row: u32,
+        col: u32,
+        before: Arc<str>,
+        after: Arc<str>,
+    },
+    /// `scope` None = workbook-wide name, Some(sheet) = sheet-local name.
+    Name {
+        scope: Option<usize>,
+        index: usize,
+        before: String,
+        after: String,
+    },
+}
+
 enum Action {
     /// Cell changes (row, col, old, new), plus style changes (row, col, old id, new id).
     Cells {
@@ -43,6 +82,9 @@ enum Action {
         sheet: usize,
         start: usize,
         perm: Vec<u32>,
+        /// Formulas the sort broke (a reference pushed off the sheet became #REF!), as
+        /// (row within the sorted block before the sort, col, original text). Undo puts them back.
+        broken: Vec<(u32, u32, Arc<str>)>,
     },
     AddSheet {
         index: usize,
@@ -56,6 +98,7 @@ enum Action {
         index: usize,
         old: String,
         new: String,
+        edits: Vec<FormulaEdit>,
     },
 }
 
@@ -71,9 +114,16 @@ pub struct Workbook {
     pub styles: Vec<CellStyle>,
     /// Formats applied by conditional formatting rules.
     pub dxfs: Vec<CellStyle>,
+    /// Workbook-wide defined names. Sheet-local ones are in [`Sheet::names`].
+    pub names: Vec<DefinedName>,
+    /// Macros from an .xlsm file.
+    pub vba: Option<VbaProject>,
+    /// Parts of the opened file that SpeedSheet cannot keep (charts, data validation, ...):
+    /// saving over the original file would remove them. Empty when nothing would be lost.
+    pub losses: Vec<String>,
     undo: Vec<Action>,
     redo: Vec<Action>,
-    deps: Option<DepIndex>,
+    pub(crate) deps: Option<DepIndex>,
 }
 
 impl Default for Workbook {
@@ -107,6 +157,12 @@ impl Workbook {
     }
 
     pub fn from_sheets(sheets: Vec<Sheet>, format: FileFormat) -> Workbook {
+        Workbook::from_sheets_named(sheets, format, Vec::new())
+    }
+
+    /// Like [`Workbook::from_sheets`], with workbook-wide defined names. Formulas without a
+    /// cached value are computed once the names are known.
+    pub fn from_sheets_named(sheets: Vec<Sheet>, format: FileFormat, names: Vec<DefinedName>) -> Workbook {
         let mut wb = Workbook {
             sheets: if sheets.is_empty() { vec![Sheet::new("Sheet1")] } else { sheets },
             path: None,
@@ -115,6 +171,9 @@ impl Workbook {
             modified: false,
             styles: vec![CellStyle::default()],
             dxfs: Vec::new(),
+            names,
+            vba: None,
+            losses: Vec::new(),
             undo: Vec::new(),
             redo: Vec::new(),
             deps: None,
@@ -140,6 +199,22 @@ impl Workbook {
         if !missing.is_empty() {
             formula::recalc(self, missing);
         }
+    }
+
+    /// The definition of a defined name as seen from `sheet`: its sheet-local name if it has
+    /// one, else the workbook-wide one. Names compare case-insensitively.
+    pub fn name_formula(&self, name: &str, sheet: usize) -> Option<&str> {
+        let find = |list: &'_ [DefinedName]| list.iter().position(|n| n.name.eq_ignore_ascii_case(name));
+        if let Some(sh) = self.sheets.get(sheet) {
+            if let Some(i) = find(&sh.names) {
+                return Some(&sh.names[i].formula);
+            }
+        }
+        find(&self.names).map(|i| self.names[i].formula.as_str())
+    }
+
+    pub(crate) fn has_names(&self) -> bool {
+        !self.names.is_empty() || self.sheets.iter().any(|s| !s.names.is_empty())
     }
 
     pub fn sheet_index_for(&self, name: Option<&str>, current: usize) -> Option<usize> {
@@ -218,11 +293,12 @@ impl Workbook {
 
     /// After rows were reordered: recompute everything except row-local formulas,
     /// plus whatever depends on what was recomputed.
-    fn recalc_after_reorder(&mut self) -> usize {
+    fn recalc_after_reorder(&mut self, extra: &[Pos]) -> usize {
         self.deps = None;
         self.deps();
         let idx = self.deps.as_ref().unwrap();
-        let seeds = idx.non_row_local();
+        let mut seeds = idx.non_row_local();
+        seeds.extend_from_slice(extra);
         if seeds.is_empty() {
             return 0;
         }
@@ -410,15 +486,20 @@ impl Workbook {
         if perm.iter().enumerate().all(|(i, &p)| i as u32 == p) {
             return Ok(Change { sheet, ..Default::default() });
         }
-        self.apply_perm(sheet, start, &perm);
-        let recalculated = self.recalc_after_reorder();
+        let broken = self.apply_perm(sheet, start, &perm);
+        // A formula that turned into #REF! may have no references left: recompute it explicitly.
+        let seeds: Vec<Pos> = broken.iter().map(|b| (sheet as u32, (start + b.1 as usize) as u32, b.2)).collect();
+        let broken: Vec<(u32, u32, Arc<str>)> = broken.into_iter().map(|(p, _, c, src)| (p, c, src)).collect();
+        let recalculated = self.recalc_after_reorder(&seeds);
         self.refresh_filter(sheet);
-        self.push_undo(Action::Sort { sheet, start, perm });
+        self.push_undo(Action::Sort { sheet, start, perm, broken });
         Ok(Change { sheet, row: 0, col, structure: true, recalculated })
     }
 
-    /// rows[start + i] = old_rows[start + perm[i]]
-    fn apply_perm(&mut self, sheet: usize, start: usize, perm: &[u32]) {
+    /// rows[start + i] = old_rows[start + perm[i]]. Returns the formulas whose shifted
+    /// references fell off the sheet, as (p, i, col, original text), so undo can restore them.
+    fn apply_perm(&mut self, sheet: usize, start: usize, perm: &[u32]) -> Vec<(u32, u32, u32, Arc<str>)> {
+        let mut broken = Vec::new();
         let sh = &mut self.sheets[sheet];
         let mut old: Vec<Option<Vec<Cell>>> =
             sh.rows[start..start + perm.len()].iter_mut().map(|r| Some(std::mem::take(r))).collect();
@@ -426,9 +507,14 @@ impl Workbook {
             let mut row = old[p as usize].take().unwrap_or_default();
             let dr = i as i64 - p as i64;
             if dr != 0 {
-                for cell in row.iter_mut() {
+                for (c, cell) in row.iter_mut().enumerate() {
                     if let Cell::Formula(f) = cell {
-                        f.src = shift_formula(&f.src, dr, 0).into();
+                        let shifted = shift_formula(&f.src, dr, 0);
+                        // Shifting is exact unless a reference left the sheet: keep the original.
+                        if shifted.matches("#REF!").count() > f.src.matches("#REF!").count() {
+                            broken.push((p, i as u32, c as u32, f.src.clone()));
+                        }
+                        f.src = shifted.into();
                     }
                 }
             }
@@ -448,6 +534,7 @@ impl Workbook {
             }
         }
         self.deps = None;
+        broken
     }
 
     fn invert(perm: &[u32]) -> Vec<u32> {
@@ -516,10 +603,99 @@ impl Workbook {
         if self.sheets.iter().enumerate().any(|(i, s)| i != index && s.name.eq_ignore_ascii_case(&name)) {
             return Err(Error::InvalidName(name));
         }
-        let old = std::mem::replace(&mut self.sheets[index].name, name.clone());
-        self.deps = None;
-        self.push_undo(Action::RenameSheet { index, old, new: name });
+        let old = self.sheets[index].name.clone();
+        if old == name {
+            return Ok(());
+        }
+        // Like Excel, formulas and names that point at the sheet follow it to its new name.
+        let edits = self.rewrite_sheet_refs(&old, &name);
+        self.sheets[index].name = name.clone();
+        self.recalc_after_rename(&old, &name, &edits);
+        self.push_undo(Action::RenameSheet { index, old, new: name, edits });
         Ok(())
+    }
+
+    /// Rewrite references to sheet `from` so they say `to`. Returns what changed.
+    fn rewrite_sheet_refs(&mut self, from: &str, to: &str) -> Vec<FormulaEdit> {
+        let mut edits = Vec::new();
+        for (si, sh) in self.sheets.iter_mut().enumerate() {
+            for (r, row) in sh.rows.iter_mut().enumerate() {
+                for (c, cell) in row.iter_mut().enumerate() {
+                    let Cell::Formula(f) = cell else { continue };
+                    if let Some(new) = rename_sheet_in_formula(&f.src, from, to) {
+                        let after: Arc<str> = new.into();
+                        let before = std::mem::replace(&mut f.src, after.clone());
+                        edits.push(FormulaEdit::Cell { sheet: si as u32, row: r as u32, col: c as u32, before, after });
+                    }
+                }
+            }
+            for (i, n) in sh.names.iter_mut().enumerate() {
+                if let Some(new) = rename_sheet_in_formula(&n.formula, from, to) {
+                    let before = std::mem::replace(&mut n.formula, new.clone());
+                    edits.push(FormulaEdit::Name { scope: Some(si), index: i, before, after: new });
+                }
+            }
+        }
+        for (i, n) in self.names.iter_mut().enumerate() {
+            if let Some(new) = rename_sheet_in_formula(&n.formula, from, to) {
+                let before = std::mem::replace(&mut n.formula, new.clone());
+                edits.push(FormulaEdit::Name { scope: None, index: i, before, after: new });
+            }
+        }
+        edits
+    }
+
+    /// Put recorded formula texts back (undo) or apply them again (redo).
+    fn apply_formula_edits(&mut self, edits: &[FormulaEdit], undo: bool) {
+        for e in edits {
+            match e {
+                FormulaEdit::Cell { sheet, row, col, before, after } => {
+                    let sh = &mut self.sheets[*sheet as usize];
+                    if let Some(Cell::Formula(f)) = sh.cell_mut(*row as usize, *col as usize) {
+                        f.src = if undo { before.clone() } else { after.clone() };
+                    }
+                }
+                FormulaEdit::Name { scope, index, before, after } => {
+                    let list = match scope {
+                        Some(s) => &mut self.sheets[*s].names,
+                        None => &mut self.names,
+                    };
+                    if let Some(n) = list.get_mut(*index) {
+                        n.formula = if undo { before.clone() } else { after.clone() };
+                    }
+                }
+            }
+        }
+    }
+
+    /// After a sheet was renamed from `a` to `b` (or back): recompute every formula that names
+    /// either sheet (a reference to a missing sheet may now resolve, or stop resolving).
+    fn recalc_after_rename(&mut self, a: &str, b: &str, edits: &[FormulaEdit]) -> usize {
+        self.deps = None;
+        if self.has_names() {
+            return self.recalc_all();
+        }
+        let mut seeds: Vec<Pos> = edits
+            .iter()
+            .filter_map(|e| match e {
+                FormulaEdit::Cell { sheet, row, col, .. } => Some((*sheet, *row, *col)),
+                FormulaEdit::Name { .. } => None,
+            })
+            .collect();
+        for (si, sh) in self.sheets.iter().enumerate() {
+            for (r, row) in sh.rows.iter().enumerate() {
+                for (c, cell) in row.iter().enumerate() {
+                    if let Cell::Formula(f) = cell {
+                        if mentions_sheet(&f.src, &[a, b]) {
+                            seeds.push((si as u32, r as u32, c as u32));
+                        }
+                    }
+                }
+            }
+        }
+        seeds.sort_unstable();
+        seeds.dedup();
+        self.recalc_after(&seeds)
     }
 
     pub fn delete_sheet(&mut self, index: usize) -> Result<()> {
@@ -567,15 +743,24 @@ impl Workbook {
                     Change { sheet, row: first.0, col: first.1, structure: false, recalculated: n },
                 )
             }
-            Action::Sort { sheet, start, perm } => {
-                if undo {
+            Action::Sort { sheet, start, perm, broken } => {
+                let seeds: Vec<Pos> = if undo {
                     self.apply_perm(sheet, start, &Self::invert(&perm));
+                    // Back in their original rows: give broken formulas their original text.
+                    let sh = &mut self.sheets[sheet];
+                    for (p, c, src) in &broken {
+                        if let Some(Cell::Formula(f)) = sh.cell_mut(start + *p as usize, *c as usize) {
+                            f.src = src.clone();
+                        }
+                    }
+                    broken.iter().map(|(p, c, _)| (sheet as u32, (start + *p as usize) as u32, *c)).collect()
                 } else {
-                    self.apply_perm(sheet, start, &perm);
-                }
-                let n = self.recalc_after_reorder();
+                    let again = self.apply_perm(sheet, start, &perm);
+                    again.iter().map(|b| (sheet as u32, (start + b.1 as usize) as u32, b.2)).collect()
+                };
+                let n = self.recalc_after_reorder(&seeds);
                 self.refresh_filter(sheet);
-                (Action::Sort { sheet, start, perm }, Change { sheet, row: 0, col: 0, structure: true, recalculated: n })
+                (Action::Sort { sheet, start, perm, broken }, Change { sheet, row: 0, col: 0, structure: true, recalculated: n })
             }
             Action::AddSheet { index, sheet } => {
                 let (sheet, change) = self.toggle_sheet(index, sheet);
@@ -585,12 +770,12 @@ impl Workbook {
                 let (sheet, change) = self.toggle_sheet(index, sheet);
                 (Action::DeleteSheet { index, sheet }, change)
             }
-            Action::RenameSheet { index, old, new } => {
+            Action::RenameSheet { index, old, new, edits } => {
+                self.apply_formula_edits(&edits, undo);
                 self.sheets[index].name = if undo { old.clone() } else { new.clone() };
-                self.deps = None;
-                let n = self.recalc_all();
+                let n = self.recalc_after_rename(&old, &new, &edits);
                 (
-                    Action::RenameSheet { index, old, new },
+                    Action::RenameSheet { index, old, new, edits },
                     Change { sheet: index, structure: true, recalculated: n, ..Default::default() },
                 )
             }

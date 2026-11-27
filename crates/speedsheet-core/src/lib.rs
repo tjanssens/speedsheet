@@ -21,7 +21,7 @@ pub mod workbook;
 pub use filter::{Filter, FilterCond, FilterOp};
 pub use sheet::{col_name, Cell, Sheet};
 pub use value::{CellError, Value};
-pub use workbook::{Change, FileFormat, Match, Workbook};
+pub use workbook::{Change, DefinedName, FileFormat, Match, VbaProject, Workbook};
 
 /// Excel's limits.
 pub const MAX_ROWS: usize = 1_048_576;
@@ -43,6 +43,9 @@ pub enum Error {
     InvalidName(String),
     #[error("a workbook needs at least one sheet")]
     LastSheet,
+    /// Saving over the opened file would remove these features (see `Workbook::losses`).
+    #[error("saving over the original file would remove: {}", .0.join(", "))]
+    WouldLoseData(Vec<String>),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
