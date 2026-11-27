@@ -261,6 +261,64 @@ impl Sheet {
         }
     }
 
+    /// One past the last data row the filter and sort apply to: the end of the filter range from
+    /// the file or the Filter button, so a totals line under the list isn't filtered or sorted
+    /// away. Without a range, all rows.
+    pub fn data_end(&self) -> usize {
+        let n = self.row_count();
+        match self.autofilter {
+            Some(a) => (a.r1 as usize + 1).min(n),
+            None => n,
+        }
+    }
+
+    /// Rows typed straight under the filter range join it, like in Excel.
+    pub fn grow_autofilter(&mut self, last_row: usize) {
+        if let Some(a) = self.autofilter.as_mut() {
+            let mut r1 = a.r1 as usize;
+            while r1 < last_row && r1 + 1 < self.rows.len() && !self.rows[r1 + 1].iter().all(|c| c.is_empty()) {
+                r1 += 1;
+            }
+            a.r1 = r1 as u32;
+        }
+    }
+
+    pub fn row_is_blank(&self, row: usize) -> bool {
+        self.rows.get(row).is_none_or(|r| r.iter().all(|c| c.is_empty()))
+    }
+
+    /// The block of filled cells around (row, col), bounded by blank rows and columns, like
+    /// Excel's "current region". Used to place a new filter range.
+    pub fn current_region(&self, row: usize, col: usize) -> Area {
+        let filled = |r: usize, c: usize| !self.cell(r, c).is_empty();
+        let (mut r0, mut r1, mut c0, mut c1) = (row, row, col, col);
+        loop {
+            let mut grown = false;
+            let row_has = |r: usize, c0: usize, c1: usize| (c0.saturating_sub(1)..=c1 + 1).any(|c| filled(r, c));
+            let col_has = |c: usize, r0: usize, r1: usize| (r0.saturating_sub(1)..=r1 + 1).any(|r| filled(r, c));
+            if r0 > 0 && row_has(r0 - 1, c0, c1) {
+                r0 -= 1;
+                grown = true;
+            }
+            if r1 + 1 < self.row_count() && row_has(r1 + 1, c0, c1) {
+                r1 += 1;
+                grown = true;
+            }
+            if c0 > 0 && col_has(c0 - 1, r0, r1) {
+                c0 -= 1;
+                grown = true;
+            }
+            if c1 + 1 < self.col_count() && col_has(c1 + 1, r0, r1) {
+                c1 += 1;
+                grown = true;
+            }
+            if !grown {
+                break;
+            }
+        }
+        Area { r0: r0 as u32, c0: c0 as u32, r1: r1 as u32, c1: c1 as u32 }
+    }
+
     /// The merged range whose top-left cell is (row, col), or that covers it.
     pub fn merge_at(&self, row: u32, col: u32) -> Option<&Area> {
         self.merges.iter().find(|m| m.contains(row, col))

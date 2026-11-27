@@ -141,6 +141,62 @@ fn autofilter_header_and_sort_keep_formats() {
     wb.set_filter(0, Some(f)).unwrap();
     let v = wb.sheets[0].view.clone().unwrap();
     assert_eq!(&v[..2], &[0, 1]);
-    assert!(v[2..].iter().all(|&r| wb.sheets[0].value(r as usize, 1).display().to_lowercase().contains("aa")));
+    // Inside the filter range only matching rows show; the totals line below it stays.
+    let end = wb.sheets[0].data_end() as u32;
+    assert!(v[2..].iter().filter(|&&r| r < end).all(|&r| wb.sheets[0]
+        .value(r as usize, 1)
+        .display()
+        .to_lowercase()
+        .contains("aa")));
+    let n = wb.sheets[0].row_count() as u32;
+    assert!((end..n).all(|r| v.contains(&r)));
     assert_eq!(wb.sheets[0].value(2, 4), &Value::Number(0.0));
+}
+
+#[test]
+fn filter_button_on_any_row() {
+    use speedsheet_core::filter::{Filter, FilterCond, FilterOp};
+    let set = |wb: &mut Workbook, r: usize, c: usize, v: &str| wb.set_inputs(0, r, c, &[vec![v.to_string()]]).unwrap();
+    use speedsheet_core::Workbook;
+    let mut wb = Workbook::new();
+    // A title, a blank row, then a list with headers on row 2 and a totals line right under it.
+    let rows = [
+        vec!["Report"],
+        vec![],
+        vec!["Name", "Town"],
+        vec!["Ann", "Gent"],
+        vec!["Bob", "Aalst"],
+        vec!["Cas", "Gent"],
+        vec!["Total", "3"],
+    ];
+    for (r, row) in rows.iter().enumerate() {
+        for (c, v) in row.iter().enumerate() {
+            set(&mut wb, r, c, v);
+        }
+    }
+    let mut area = wb.sheets[0].current_region(3, 1);
+    assert_eq!((area.r0, area.c0, area.r1, area.c1), (2, 0, 6, 1));
+    area.r1 = 5; // as read from a file whose filter range stops above the totals line
+    wb.set_autofilter(0, Some(area)).unwrap();
+    assert_eq!(wb.sheets[0].data_start(true), 3);
+    assert_eq!(wb.sheets[0].data_end(), 6);
+    let f = Filter { header: true, conds: vec![FilterCond { col: 1, op: FilterOp::Equals { value: "Gent".into() } }] };
+    wb.set_filter(0, Some(f)).unwrap();
+    // Title, blank, header, Ann, Cas, then the totals line below the range stays.
+    assert_eq!(wb.sheets[0].view.as_deref().unwrap(), &[0, 1, 2, 3, 5, 6]);
+    // Sorting stays inside the range too.
+    wb.set_filter(0, None).unwrap();
+    wb.sort(0, 0, false, true).unwrap();
+    assert_eq!(wb.sheets[0].value(3, 0).display(), "Cas");
+    assert_eq!(wb.sheets[0].value(6, 0).display(), "Total");
+    // A row typed straight under the range joins it.
+    let mut wb2 = Workbook::new();
+    set(&mut wb2, 0, 0, "Name");
+    set(&mut wb2, 1, 0, "Ann");
+    let region = wb2.sheets[0].current_region(0, 0);
+    wb2.set_autofilter(0, Some(region)).unwrap();
+    set(&mut wb2, 2, 0, "Bob");
+    assert_eq!(wb2.sheets[0].data_end(), 3);
+    wb.set_autofilter(0, None).unwrap();
+    assert!(wb.sheets[0].autofilter.is_none());
 }
