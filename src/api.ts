@@ -4,10 +4,12 @@ import { invoke } from "@tauri-apps/api/core";
 
 export const isTauri = "__TAURI_INTERNALS__" in window;
 const BRIDGE = "http://127.0.0.1:1421";
+/** In the browser every tab is a window of its own; the desktop app knows its windows itself. */
+const VIEW = Math.random().toString(36).slice(2, 10);
 
 export async function call<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
   if (isTauri) return invoke<T>("call", { cmd, args });
-  const res = await fetch(`${BRIDGE}/${cmd}`, {
+  const res = await fetch(`${BRIDGE}/${cmd}?view=${VIEW}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(args),
@@ -15,6 +17,41 @@ export async function call<T>(cmd: string, args: Record<string, unknown> = {}): 
   const body = await res.json();
   if (!res.ok) throw body;
   return body as T;
+}
+
+/** Listen for messages from the engine meant for this window: `doc-changed` when another window
+ * on the same file changed it, `peers` when the other windows on it or their cursors changed. */
+export async function onBackendEvent<T>(name: string, handler: (payload: T) => void) {
+  if (isTauri) {
+    const { getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+    await getCurrentWebviewWindow().listen<T>(name, (e) => handler(e.payload));
+    return;
+  }
+  (handlers[name] ??= []).push(handler as (p: unknown) => void);
+  if (!polling) {
+    polling = true;
+    pollEvents();
+  }
+}
+
+const handlers: Record<string, ((p: unknown) => void)[]> = {};
+let polling = false;
+
+/** The dev bridge has no push channel: fetch this tab's messages a few times per second. */
+async function pollEvents() {
+  try {
+    const evs = await call<{ event: string; payload: unknown }[]>("_events");
+    for (const ev of evs) for (const h of handlers[ev.event] ?? []) h(ev.payload);
+  } catch {
+    /* bridge restarting */
+  }
+  window.setTimeout(pollEvents, evsDelay());
+}
+const evsDelay = () => (document.hidden ? 1000 : 150);
+
+/** Tell the dev bridge this tab is gone (the desktop app sees its windows close). */
+export function closeBrowserView() {
+  if (!isTauri) navigator.sendBeacon(`${BRIDGE}/close_view?view=${VIEW}`, "null");
 }
 
 /** Desktop-only commands (printing, app info, feedback); undefined in the browser. */
@@ -116,6 +153,31 @@ export interface Layout {
   freeze: [number, number] | null;
   autofilter: { row: number; dataRow: number; c0: number; c1: number } | null;
   hideGrid: boolean;
+}
+
+export interface Presence {
+  sheet: number;
+  row: number;
+  col: number;
+  r0: number;
+  c0: number;
+  r1: number;
+  c1: number;
+}
+
+/** The other windows on this window's file. */
+export interface Peers {
+  /** This window's 1-based number (the ":2" in "Book.xlsx:2"). */
+  number: number;
+  /** Windows on the file, this one included. */
+  count: number;
+  peers: { view: string; number: number; presence: Presence | null }[];
+}
+
+export interface DocChanged {
+  by: string;
+  cmd: string;
+  info: BookInfo;
 }
 
 export interface EditResult {

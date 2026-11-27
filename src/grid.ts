@@ -198,6 +198,8 @@ export class Grid {
   } = null;
   /** References shown in color while a formula is edited. */
   refHighlights: { rect: Rect; color: string }[] = [];
+  /** Cursors of other windows on the same file (on any sheet; only this sheet's are drawn). */
+  peerCursors: { sheet: number; active: Pos; rect: Rect; color: string; label: string }[] = [];
 
   constructor(host: HTMLElement) {
     this.host = host;
@@ -1122,6 +1124,32 @@ export class Grid {
       ctx.strokeStyle = h.color;
       ctx.lineWidth = 2;
       ctx.strokeRect(x0 + 1, y0 + 1, w - 2, hgt - 2);
+      ctx.restore();
+    }
+    // Other windows on this file: their selection, active cell and a name tag.
+    for (const p of this.peerCursors) {
+      if (p.sheet !== this.sheet) continue;
+      const q = p.rect;
+      const x0 = xOf(q.c0);
+      const y0 = yOf(q.r0);
+      ctx.save();
+      ctx.globalAlpha = 0.1;
+      ctx.fillStyle = p.color;
+      ctx.fillRect(x0, y0, xOf(q.c1 + 1) - x0, yOf(q.r1 + 1) - y0);
+      ctx.globalAlpha = 1;
+      const a = this.cellRect(p.active.row, p.active.col);
+      ctx.strokeStyle = p.color;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(a.x + 1, a.y + 1, a.w - 2, a.h - 2);
+      ctx.font = `600 10px ${FONT_STACK}`;
+      const tw = ctx.measureText(p.label).width + 8;
+      const ty = a.y - 14 >= HH ? a.y - 14 : a.y + a.h;
+      ctx.fillStyle = p.color;
+      ctx.fillRect(a.x, ty, tw, 14);
+      ctx.fillStyle = "#fff";
+      ctx.textBaseline = "middle";
+      ctx.textAlign = "left";
+      ctx.fillText(p.label, a.x + 4, ty + 7.5);
       ctx.restore();
     }
     // Selection border and active cell.

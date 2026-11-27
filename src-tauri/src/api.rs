@@ -3,10 +3,12 @@
 //! and the browser dev bridge (`examples/dev_bridge.rs`) does the same over HTTP.
 
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as Json};
+use speedsheet_core::shared::{Hub, Presence};
 use speedsheet_core::{io, ops, Change, FileFormat, Filter, Workbook};
 
 #[derive(Serialize)]
@@ -435,5 +437,158 @@ pub fn dispatch(wb: &mut Workbook, cmd: &str, a: Json) -> Result<Json, String> {
             ok(json!({ "html": html, "rows": rows, "truncated": truncated }))
         }
         other => Err(format!("unknown command {other}")),
+    }
+}
+
+// ---------------------------------------------------------------- windows on shared documents
+
+/// Commands that change the document: after one of these the other windows on the same
+/// document are told to refresh.
+const CHANGES_DOC: &[&str] = &[
+    "save_file",
+    "set_inputs",
+    "paste",
+    "clear_range",
+    "fill",
+    "fill_auto",
+    "undo",
+    "redo",
+    "sort",
+    "set_filter",
+    "add_sheet",
+    "rename_sheet",
+    "delete_sheet",
+    "set_col_width",
+    "set_row_height",
+];
+
+/// A message for one window.
+#[derive(Debug)]
+pub struct Event {
+    pub to: String,
+    /// `doc-changed` (payload: `{ by, cmd, info }`) or `peers` (payload: [`speedsheet_core::shared::Peers`]).
+    pub name: &'static str,
+    pub payload: Json,
+}
+
+/// The result of a command plus the messages it causes for other windows.
+pub struct Reply {
+    pub value: Json,
+    pub events: Vec<Event>,
+}
+
+fn lock_hub(hub: &Mutex<Hub>) -> Result<std::sync::MutexGuard<'_, Hub>, String> {
+    hub.lock().map_err(|_| "internal error: state lock poisoned".to_string())
+}
+
+/// `peers` events for every listed window, telling each who else is on its document.
+fn peer_events(hub: &Hub, views: impl IntoIterator<Item = String>) -> Vec<Event> {
+    views
+        .into_iter()
+        .map(|v| Event { payload: serde_json::to_value(hub.peers(&v)).unwrap_or(Json::Null), name: "peers", to: v })
+        .collect()
+}
+
+/// Like [`dispatch`], for the window `view` of an app where several windows can each show a
+/// document, and two windows on the same file share one document. Handles opening (with the
+/// "already open" check), cursors and closing; everything else goes to [`dispatch`] on the
+/// window's document.
+pub fn dispatch_view(hub: &Mutex<Hub>, view: &str, cmd: &str, a: Json) -> Result<Reply, String> {
+    let reply = |value: Json, events: Vec<Event>| Ok(Reply { value, events });
+    match cmd {
+        "find_open" => {
+            // Which other window has this file open, if any: `{ view, name }` or null.
+            #[derive(Deserialize)]
+            struct A {
+                path: String,
+            }
+            let A { path } = args(a)?;
+            let path = PathBuf::from(path);
+            let other = lock_hub(hub)?.views_with_file(&path, view).into_iter().next();
+            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            reply(other.map_or(Json::Null, |v| json!({ "view": v, "name": name })), Vec::new())
+        }
+        "open_file" => {
+            // With `shared`, a file another window has open is not loaded again: this window
+            // joins that window's document, so both show and edit the same workbook.
+            #[derive(Deserialize)]
+            struct A {
+                path: String,
+                #[serde(default)]
+                shared: bool,
+            }
+            let A { path, shared } = args(a)?;
+            let path = PathBuf::from(path);
+            if shared {
+                let mut h = lock_hub(hub)?;
+                let other = h.views_with_file(&path, view).into_iter().next();
+                if let Some(old_peers) = other.and_then(|o| h.attach_shared(view, &o)) {
+                    let doc = h.doc(view);
+                    let mut targets = old_peers;
+                    targets.extend(h.peers_of(view));
+                    let events = peer_events(&h, targets);
+                    drop(h);
+                    let wb = doc.lock().map_err(|_| "internal error: document lock poisoned")?;
+                    return reply(ok(info(&wb))?, events);
+                }
+                // That window closed meanwhile: load the file as usual.
+            }
+            // Load without holding any lock, so other windows stay responsive.
+            let wb = io::open(&path).map_err(e)?;
+            let value = ok(info(&wb))?;
+            let mut h = lock_hub(hub)?;
+            let old_peers = h.attach_new(view, wb);
+            reply(value, peer_events(&h, old_peers))
+        }
+        "new_book" => {
+            let wb = Workbook::new();
+            let value = ok(info(&wb))?;
+            let mut h = lock_hub(hub)?;
+            let old_peers = h.attach_new(view, wb);
+            reply(value, peer_events(&h, old_peers))
+        }
+        "set_presence" => {
+            #[derive(Deserialize)]
+            struct A {
+                presence: Option<Presence>,
+            }
+            let A { presence } = args(a)?;
+            let mut h = lock_hub(hub)?;
+            h.set_presence(view, presence);
+            let peers = h.peers_of(view);
+            reply(Json::Null, peer_events(&h, peers))
+        }
+        "peers" => {
+            let mut h = lock_hub(hub)?;
+            h.doc(view);
+            reply(ok(h.peers(view))?, Vec::new())
+        }
+        "close_view" => {
+            let mut h = lock_hub(hub)?;
+            let old_peers = h.detach(view);
+            reply(Json::Null, peer_events(&h, old_peers))
+        }
+        _ => {
+            let (doc, shared) = {
+                let mut h = lock_hub(hub)?;
+                (h.doc(view), !h.peers_of(view).is_empty())
+            };
+            let changes = CHANGES_DOC.contains(&cmd);
+            let (value, book, path) = {
+                let mut wb = doc.lock().map_err(|_| "internal error: document lock poisoned")?;
+                let value = dispatch(&mut wb, cmd, a)?;
+                let book = (changes && shared).then(|| info(&wb));
+                let path = (cmd == "save_file").then(|| wb.path.clone());
+                (value, book, path)
+            };
+            if let Some(path) = path {
+                lock_hub(hub)?.set_path(view, path.as_deref());
+            }
+            let Some(book) = book else { return reply(value, Vec::new()) };
+            let payload = json!({ "by": view, "cmd": cmd, "info": book });
+            let peers = lock_hub(hub)?.peers_of(view);
+            let events = peers.into_iter().map(|to| Event { to, name: "doc-changed", payload: payload.clone() }).collect();
+            reply(value, events)
+        }
     }
 }
