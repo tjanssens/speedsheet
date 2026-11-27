@@ -21,7 +21,7 @@ pub mod workbook;
 pub use filter::{Filter, FilterCond, FilterOp};
 pub use sheet::{col_name, Cell, Sheet};
 pub use value::{CellError, Value};
-pub use workbook::{Change, FileFormat, Match, Workbook};
+pub use workbook::{Change, DefinedName, FileFormat, Match, VbaProject, Workbook};
 
 /// Excel's limits.
 pub const MAX_ROWS: usize = 1_048_576;

@@ -556,6 +556,20 @@ pub fn collect_refs<'a>(e: &'a Expr, out: &mut Vec<&'a RefTok>) {
     }
 }
 
+/// Collect every defined name an expression uses.
+pub fn collect_names<'a>(e: &'a Expr, out: &mut Vec<&'a str>) {
+    match e {
+        Expr::Name(n) => out.push(n),
+        Expr::Neg(a) | Expr::Percent(a) => collect_names(a, out),
+        Expr::Bin(_, a, b) => {
+            collect_names(a, out);
+            collect_names(b, out);
+        }
+        Expr::Call(_, args) => args.iter().for_each(|a| collect_names(a, out)),
+        _ => {}
+    }
+}
+
 pub fn has_volatile(e: &Expr) -> bool {
     match e {
         Expr::Call(name, args) => {
@@ -643,6 +657,46 @@ pub fn shift_formula(src: &str, dr: i64, dc: i64) -> String {
     out
 }
 
+/// Point references to sheet `from` at sheet `to` instead (sheet names compare
+/// case-insensitively, like Excel). Returns None when nothing refers to `from`.
+pub fn rename_sheet_in_formula(src: &str, from: &str, to: &str) -> Option<String> {
+    if !src.contains('!') {
+        return None;
+    }
+    let toks = tokenize(src).ok()?;
+    let mut out = String::with_capacity(src.len() + to.len());
+    let mut last = 0;
+    for t in &toks {
+        let Tok::Ref(r) = &t.tok else { continue };
+        if !r.sheet.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(from)) {
+            continue;
+        }
+        let text = &src[t.start..t.end];
+        let Some(bang) = text.rfind('!') else { continue };
+        out.push_str(&src[last..t.start]);
+        out.push_str(&sheet_prefix(to));
+        out.push_str(&text[bang + 1..]);
+        last = t.end;
+    }
+    if last == 0 {
+        return None;
+    }
+    out.push_str(&src[last..]);
+    Some(out)
+}
+
+/// Does the formula refer to a sheet with one of these names?
+pub fn mentions_sheet(src: &str, names: &[&str]) -> bool {
+    if !src.contains('!') {
+        return false;
+    }
+    let Ok(toks) = tokenize(src) else { return false };
+    toks.iter().any(|t| match &t.tok {
+        Tok::Ref(RefTok { sheet: Some(s), .. }) => names.iter().any(|n| s.eq_ignore_ascii_case(n)),
+        _ => false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -665,5 +719,18 @@ mod tests {
         assert_eq!(shift_formula("SUM(A1:A10)", 2, 0), "SUM(A3:A12)");
         assert_eq!(shift_formula("A1", -1, 0), "#REF!");
         assert_eq!(shift_formula("'My Sheet'!A1&\"A1\"", 0, 1), "'My Sheet'!B1&\"A1\"");
+    }
+
+    #[test]
+    fn renames_sheet_refs() {
+        assert_eq!(rename_sheet_in_formula("Sheet1!A1*2", "sheet1", "Data").as_deref(), Some("Data!A1*2"));
+        assert_eq!(
+            rename_sheet_in_formula("SUM('Sheet1'!$A$1:B2)+Other!A1+\"Sheet1!A1\"", "Sheet1", "My Data").as_deref(),
+            Some("SUM('My Data'!$A$1:B2)+Other!A1+\"Sheet1!A1\"")
+        );
+        assert_eq!(rename_sheet_in_formula("A1+Other!B2", "Sheet1", "Data"), None);
+        assert_eq!(rename_sheet_in_formula("Sheet1!A1", "Sheet1", "it's").as_deref(), Some("'it''s'!A1"));
+        assert!(mentions_sheet("'data'!A1", &["Data"]));
+        assert!(!mentions_sheet("A1+\"Data!A1\"", &["Data"]));
     }
 }

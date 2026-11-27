@@ -4,12 +4,15 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 
 use super::parser::{Expr, RefTok};
+use super::MAX_NAME_DEPTH;
 use crate::value::{compare_text, format_date, format_number, serial_to_ymd, ymd_to_serial, CellError, Value};
 
 /// What the evaluator needs from a workbook.
 pub trait Context {
     /// Resolve a sheet name (None = the formula's own sheet, given as `current`).
     fn resolve_sheet(&self, name: Option<&str>, current: usize) -> Option<usize>;
+    /// The parsed definition of a defined name as seen from `sheet` (sheet-local names first).
+    fn name_expr(&mut self, name: &str, sheet: usize) -> Option<Arc<Expr>>;
     /// Value of a cell, computing it first if it is a stale formula.
     fn cell_value(&mut self, sheet: usize, row: u32, col: u32) -> Value;
     /// Used size (rows, cols) of a sheet, to clip whole-column/row references.
@@ -49,6 +52,8 @@ pub struct Evaluator<'c, C: Context> {
     pub sheet: usize,
     pub row: u32,
     pub col: u32,
+    /// How many defined names deep the evaluation currently is (guards against name cycles).
+    name_depth: u32,
 }
 
 type R<T> = Result<T, CellError>;
@@ -62,6 +67,10 @@ fn num(n: f64) -> Value {
 }
 
 impl<'c, C: Context> Evaluator<'c, C> {
+    pub fn new(ctx: &'c mut C, sheet: usize, row: u32, col: u32) -> Self {
+        Evaluator { ctx, sheet, row, col, name_depth: 0 }
+    }
+
     pub fn eval_formula(&mut self, e: &Expr) -> Value {
         match self.eval(e) {
             Ev::V(v) => v,
@@ -101,7 +110,20 @@ impl<'c, C: Context> Evaluator<'c, C> {
             Expr::Bool(b) => Ev::V(Value::Bool(*b)),
             Expr::Err(er) => Ev::V(Value::Error(*er)),
             Expr::Missing => Ev::V(Value::Empty),
-            Expr::Name(_) => Ev::V(Value::Error(CellError::Name)),
+            Expr::Name(n) => {
+                if self.name_depth >= MAX_NAME_DEPTH {
+                    return Ev::V(Value::Error(CellError::Name));
+                }
+                match self.ctx.name_expr(n, self.sheet) {
+                    Some(def) => {
+                        self.name_depth += 1;
+                        let v = self.eval(&def);
+                        self.name_depth -= 1;
+                        v
+                    }
+                    None => Ev::V(Value::Error(CellError::Name)),
+                }
+            }
             Expr::Ref(r) => match self.resolve(r) {
                 Ok(rng) if r.is_single_cell() => Ev::V(self.ctx.cell_value(rng.sheet, rng.r0, rng.c0)),
                 Ok(rng) => Ev::R(rng),
@@ -166,7 +188,7 @@ impl<'c, C: Context> Evaluator<'c, C> {
                     Value::Empty => {}
                     Value::Error(e) => return Err(e),
                     v => {
-                        if matches!(a, Expr::Ref(_)) {
+                        if matches!(a, Expr::Ref(_) | Expr::Name(_)) {
                             if let Value::Number(n) | Value::Date(n) = v {
                                 f(n)
                             }
@@ -321,7 +343,7 @@ impl<'c, C: Context> Evaluator<'c, C> {
                         match self.eval(a) {
                             Ev::V(v) => {
                                 if matches!(v, Value::Number(_) | Value::Date(_))
-                                    || (!matches!(a, Expr::Ref(_)) && v.as_number().is_ok() && !v.is_empty())
+                                    || (!matches!(a, Expr::Ref(_) | Expr::Name(_)) && v.as_number().is_ok() && !v.is_empty())
                                 {
                                     c += 1
                                 }
