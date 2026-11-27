@@ -4,6 +4,7 @@
 //! formulas, sorting, filtering, searching and undo/redo. The Tauri app is a thin shell
 //! around this crate, so it can be swapped for a native UI later.
 
+pub mod fill;
 pub mod filter;
 pub mod formula;
 pub mod input;

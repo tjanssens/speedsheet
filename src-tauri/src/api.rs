@@ -256,6 +256,31 @@ pub fn dispatch(wb: &mut Workbook, cmd: &str, a: Json) -> Result<Json, String> {
             let ch = wb.clear(r.sheet, r.r0, r.c0, r.r1, r.c1).map_err(e)?;
             ok(edit_result(wb, ch))
         }
+        "fill" => {
+            #[derive(Deserialize)]
+            struct R {
+                r0: usize,
+                c0: usize,
+                r1: usize,
+                c1: usize,
+            }
+            #[derive(Deserialize)]
+            struct A {
+                sheet: usize,
+                src: R,
+                dst: R,
+            }
+            let A { sheet, src, dst } = args(a)?;
+            let ch = wb.fill(sheet, (src.r0, src.c0, src.r1, src.c1), (dst.r0, dst.c0, dst.r1, dst.c1)).map_err(e)?;
+            ok(edit_result(wb, ch))
+        }
+        "fill_auto" => {
+            let r: Rect = args(a)?;
+            match wb.fill_down_auto(r.sheet, (r.r0, r.c0, r.r1, r.c1)).map_err(e)? {
+                Some((end, ch)) => ok(json!({ "end": end, "result": edit_result(wb, ch) })),
+                None => ok(Json::Null),
+            }
+        }
         "undo" => {
             let ch = wb.undo();
             ok(ch.map(|c| edit_result(wb, c)))

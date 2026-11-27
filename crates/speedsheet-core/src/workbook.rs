@@ -32,11 +32,30 @@ impl FileFormat {
 }
 
 enum Action {
-    Cells { sheet: usize, changes: Vec<(u32, u32, Cell, Cell)> },
-    Sort { sheet: usize, start: usize, perm: Vec<u32> },
-    AddSheet { index: usize, sheet: Option<Box<Sheet>> },
-    DeleteSheet { index: usize, sheet: Option<Box<Sheet>> },
-    RenameSheet { index: usize, old: String, new: String },
+    /// Cell changes (row, col, old, new), plus style changes (row, col, old id, new id).
+    Cells {
+        sheet: usize,
+        changes: Vec<(u32, u32, Cell, Cell)>,
+        styles: Vec<(u32, u32, u16, u16)>,
+    },
+    Sort {
+        sheet: usize,
+        start: usize,
+        perm: Vec<u32>,
+    },
+    AddSheet {
+        index: usize,
+        sheet: Option<Box<Sheet>>,
+    },
+    DeleteSheet {
+        index: usize,
+        sheet: Option<Box<Sheet>>,
+    },
+    RenameSheet {
+        index: usize,
+        old: String,
+        new: String,
+    },
 }
 
 const UNDO_LIMIT: usize = 500;
@@ -242,7 +261,7 @@ impl Workbook {
         let first = flat.first().map(|c| (c.0 as usize, c.1 as usize)).unwrap_or((view_row, col));
         let (changes, n) = self.write_cells(sheet, flat);
         if !changes.is_empty() {
-            self.push_undo(Action::Cells { sheet, changes });
+            self.push_undo(Action::Cells { sheet, changes, styles: Vec::new() });
         }
         Ok(Change { sheet, row: first.0, col: first.1, structure: false, recalculated: n })
     }
@@ -263,9 +282,97 @@ impl Workbook {
         }
         let (changes, n) = self.write_cells(sheet, flat);
         if !changes.is_empty() {
-            self.push_undo(Action::Cells { sheet, changes });
+            self.push_undo(Action::Cells { sheet, changes, styles: Vec::new() });
         }
         Ok(Change { sheet, row: vr0, col: c0, structure: false, recalculated: n })
+    }
+
+    /// Fill handle: extend `src` (view rows, inclusive) to cover `dst`, which contains `src` and
+    /// grows it in one direction. Series continue, formulas shift, formats are copied.
+    pub fn fill(&mut self, sheet: usize, src: (usize, usize, usize, usize), dst: (usize, usize, usize, usize)) -> Result<Change> {
+        let sh = self.sheet_checked(sheet)?;
+        let (sr0, sc0, sr1, sc1) = src;
+        let (dr0, dc0, dr1, dc1) = dst;
+        let vertical = dr0 < sr0 || dr1 > sr1;
+        let mut flat: Vec<(u32, u32, Cell)> = Vec::new();
+        let mut styles: Vec<(u32, u32, u16, u16)> = Vec::new();
+        let data = |vr: usize| sh.data_row(vr).filter(|&r| r < crate::MAX_ROWS);
+        if vertical {
+            let src_rows: Vec<usize> = (sr0..=sr1).filter_map(data).collect();
+            let targets: Vec<(i64, usize)> =
+                (dr0..sr0).chain(sr1 + 1..=dr1).filter_map(|vr| data(vr).map(|r| (vr as i64 - sr0 as i64, r))).collect();
+            if src_rows.is_empty() || targets.is_empty() {
+                return Ok(Change { sheet, row: sr0, col: sc0, ..Default::default() });
+            }
+            let n = src_rows.len();
+            for c in sc0..=sc1.min(crate::MAX_COLS - 1) {
+                let cells: Vec<&Cell> = src_rows.iter().map(|&r| sh.cell(r, c)).collect();
+                let delta = |k: i64, i: usize| -> (i64, i64) {
+                    let tr = targets.iter().find(|t| t.0 == k).map(|t| t.1).unwrap_or(0);
+                    (tr as i64 - src_rows[i] as i64, 0)
+                };
+                let out = crate::fill::fill_line(&cells, targets.iter().map(|t| t.0), &delta);
+                for ((k, r), cell) in targets.iter().zip(out) {
+                    flat.push((*r as u32, c as u32, cell));
+                    let sid = sh.style_id(src_rows[k.rem_euclid(n as i64) as usize], c);
+                    let old = sh.style_id(*r, c);
+                    if old != sid {
+                        styles.push((*r as u32, c as u32, old, sid));
+                    }
+                }
+            }
+        } else {
+            let src_cols: Vec<usize> = (sc0..=sc1).collect();
+            let targets: Vec<(i64, usize)> =
+                (dc0..sc0).chain(sc1 + 1..=dc1.min(crate::MAX_COLS - 1)).map(|c| (c as i64 - sc0 as i64, c)).collect();
+            if targets.is_empty() {
+                return Ok(Change { sheet, row: sr0, col: sc0, ..Default::default() });
+            }
+            let n = src_cols.len();
+            for vr in sr0..=sr1 {
+                let Some(r) = data(vr) else { continue };
+                let cells: Vec<&Cell> = src_cols.iter().map(|&c| sh.cell(r, c)).collect();
+                let delta = |k: i64, i: usize| -> (i64, i64) { (0, k - i as i64) };
+                let out = crate::fill::fill_line(&cells, targets.iter().map(|t| t.0), &delta);
+                for ((k, c), cell) in targets.iter().zip(out) {
+                    flat.push((r as u32, *c as u32, cell));
+                    let sid = sh.style_id(r, src_cols[k.rem_euclid(n as i64) as usize]);
+                    let old = sh.style_id(r, *c);
+                    if old != sid {
+                        styles.push((r as u32, *c as u32, old, sid));
+                    }
+                }
+            }
+        }
+        let sh = &mut self.sheets[sheet];
+        for (r, c, _, new) in &styles {
+            sh.set_style_id(*r as usize, *c as usize, *new);
+        }
+        let (changes, n) = self.write_cells(sheet, flat);
+        if !changes.is_empty() || !styles.is_empty() {
+            self.push_undo(Action::Cells { sheet, changes, styles });
+            self.modified = true;
+        }
+        Ok(Change { sheet, row: dr0, col: dc0, structure: false, recalculated: n })
+    }
+
+    /// Double-click on the fill handle: fill `src` down as far as the column next to it has data.
+    pub fn fill_down_auto(&mut self, sheet: usize, src: (usize, usize, usize, usize)) -> Result<Option<(usize, Change)>> {
+        let sh = self.sheet_checked(sheet)?;
+        let (sr0, sc0, sr1, sc1) = src;
+        let filled = |c: usize, vr: usize| sh.data_row(vr).is_some_and(|r| !sh.cell(r, c).is_empty());
+        let len = sh.view_len();
+        let run = |c: usize| (sr1 + 1..len).take_while(|&vr| filled(c, vr)).count();
+        let mut n = if sc0 > 0 { run(sc0 - 1) } else { 0 };
+        if n == 0 {
+            n = run(sc1 + 1);
+        }
+        if n == 0 {
+            return Ok(None);
+        }
+        let end = sr1 + n;
+        let ch = self.fill(sheet, src, (sr0, sc0, end, sc1))?;
+        Ok(Some((end, ch)))
     }
 
     /// Sort data rows by one column. Formulas move with their row and their relative
@@ -429,13 +536,17 @@ impl Workbook {
     /// Apply an action in reverse (undo=true) or forward, returning its mirror for the other stack.
     fn apply_action(&mut self, a: Action, undo: bool) -> (Action, Change) {
         match a {
-            Action::Cells { sheet, changes } => {
+            Action::Cells { sheet, changes, styles } => {
                 let cells =
                     changes.iter().map(|(r, c, old, new)| (*r, *c, if undo { old.clone() } else { new.clone() })).collect();
-                let first = changes.first().map(|x| (x.0 as usize, x.1 as usize)).unwrap_or_default();
+                let first = changes.first().or(None).map(|x| (x.0 as usize, x.1 as usize));
+                let first = first.or(styles.first().map(|x| (x.0 as usize, x.1 as usize))).unwrap_or_default();
+                for (r, c, old, new) in &styles {
+                    self.sheets[sheet].set_style_id(*r as usize, *c as usize, if undo { *old } else { *new });
+                }
                 let (_, n) = self.write_cells(sheet, cells);
                 (
-                    Action::Cells { sheet, changes },
+                    Action::Cells { sheet, changes, styles },
                     Change { sheet, row: first.0, col: first.1, structure: false, recalculated: n },
                 )
             }

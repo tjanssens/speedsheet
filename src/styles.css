@@ -203,11 +203,25 @@ input, textarea { -webkit-user-select: text; user-select: text; }
 #update-banner[hidden] { display: none; }
 #update-banner span { flex: 1; }
 
+/* Formula help */
+#fx-pop, #fx-hint {
+  position: fixed; z-index: 35; background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: var(--shadow); font-size: 12.5px; max-width: 380px;
+}
+#fx-pop[hidden], #fx-hint[hidden] { display: none; }
+#fx-pop { padding: 4px; min-width: 260px; max-height: 300px; overflow: auto; }
+#fx-pop .item { display: flex; flex-direction: column; gap: 1px; padding: 4px 8px; border-radius: 5px; cursor: pointer; }
+#fx-pop .item span { color: var(--muted); font-size: 11.5px; }
+#fx-pop .item.sel { background: var(--accent-soft); }
+#fx-hint { padding: 6px 10px; display: flex; flex-direction: column; gap: 3px; }
+#fx-hint .sig { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+#fx-hint .desc { color: var(--muted); font-size: 11.5px; }
+
 /* Printing: only the print root is visible. */
 #print-root { display: none; }
 @media print {
   @page { margin: 12mm; }
-  #app, #popover, #modal-backdrop, #toast, #update-banner { display: none !important; }
+  #app, #popover, #modal-backdrop, #toast, #update-banner, #fx-pop, #fx-hint { display: none !important; }
   html, body { height: auto; overflow: visible; background: #fff; color: #000; }
   #print-root { display: block; font: 10pt/1.25 system-ui, sans-serif; }
   #print-root h1 { font-size: 13pt; margin: 0 0 6pt; }
