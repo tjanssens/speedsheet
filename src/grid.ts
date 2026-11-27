@@ -217,6 +217,9 @@ export class Grid {
     this.scroller.addEventListener("mousedown", (e) => this.onMouseDown(e));
     window.addEventListener("mousemove", (e) => this.onMouseMove(e));
     window.addEventListener("mouseup", () => this.onMouseUp());
+    // A release outside the window (or while another window has focus) never sends mouseup:
+    // end the drag then too, so the selection doesn't keep following the pointer.
+    window.addEventListener("blur", () => this.cancelDrags());
     this.scroller.addEventListener("dblclick", (e) => {
       const h = this.hit(e);
       if (h.area === "fill") {
@@ -838,7 +841,21 @@ export class Grid {
     e.preventDefault();
   }
 
+  /** Stop a drag whose button release never reached us, without applying a fill. */
+  private cancelDrags() {
+    if (!this.drag && !this.fillDrag && !this.pointDrag && !this.resize) return;
+    if (this.fillDrag) {
+      this.fillDrag = null;
+      this.render();
+    }
+    this.onMouseUp();
+  }
+
   private onMouseMove(e: MouseEvent) {
+    if (e.buttons === 0 && (this.drag || this.fillDrag || this.pointDrag || this.resize)) {
+      this.cancelDrags();
+      return;
+    }
     const r = this.scroller.getBoundingClientRect();
     this.lastMouse = { x: e.clientX - r.left, y: e.clientY - r.top };
     if (this.resize) {
@@ -942,7 +959,7 @@ export class Grid {
         return;
       }
       if (this.drag) this.dragTo();
-      else window.dispatchEvent(new MouseEvent("mousemove", { clientX: this.lastMouse.x + this.scroller.getBoundingClientRect().left, clientY: this.lastMouse.y + this.scroller.getBoundingClientRect().top }));
+      else window.dispatchEvent(new MouseEvent("mousemove", { clientX: this.lastMouse.x + this.scroller.getBoundingClientRect().left, clientY: this.lastMouse.y + this.scroller.getBoundingClientRect().top, buttons: 1 }));
       this.autoScroll = requestAnimationFrame(step);
     };
     this.autoScroll = requestAnimationFrame(step);
