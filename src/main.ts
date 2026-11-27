@@ -1,5 +1,5 @@
 import { call, native, isTauri, errorText } from "./api";
-import type { AppInfo, BookInfo, Copied, EditResult, Filter, FilterCond, Match, Stats } from "./api";
+import type { AppInfo, BookInfo, Copied, EditResult, Filter, FilterCond, Layout, Match, Stats, Styles } from "./api";
 import { Grid, colName, parseAddress, type Rect } from "./grid";
 import { openFilterPopover, closePopover, openMenu } from "./popover";
 import { openFeedback } from "./feedback";
@@ -80,13 +80,49 @@ function curSheet() {
   return book.sheets[sheet];
 }
 
+/** Bumped whenever a different workbook is loaded, so styles and layouts are fetched again. */
+let bookGen = 0;
+let stylesGen = -1;
+let layoutKey = "";
+
+async function loadStyles() {
+  if (stylesGen === bookGen) return;
+  const gen = bookGen;
+  try {
+    const st = await call<Styles>("get_styles");
+    if (gen !== bookGen) return;
+    stylesGen = gen;
+    grid.setStyles(st.styles, st.dxfs);
+  } catch {
+    /* ignore */
+  }
+}
+
+async function loadLayout(force = false) {
+  const s = curSheet();
+  const key = `${bookGen}:${sheet}:${s.rows}:${JSON.stringify(s.filter)}`;
+  if (!force && key === layoutKey) return;
+  layoutKey = key;
+  try {
+    const l = await call<Layout>("get_layout", { sheet });
+    if (key !== layoutKey) return;
+    grid.setLayout(l);
+  } catch {
+    grid.setLayout(null);
+  }
+}
+
 function applyInfo(info: BookInfo, focusSheet = sheet) {
   book = info;
   sheet = Math.max(0, Math.min(focusSheet, info.sheets.length - 1));
   const s = curSheet();
   const filterCols = s.filter ? s.filter.conds.map((c) => c.col) : null;
   grid.showFilterButtons = !!s.filter || grid.showFilterButtons;
+  // Another sheet or file: drop the old layout right away instead of showing it on the new sheet.
+  if (!layoutKey.startsWith(`${bookGen}:${sheet}:`)) grid.setLayout(null);
   grid.setSheet(sheet, s.rows, s.cols, s.colWidths, filterCols);
+  loadStyles();
+  loadLayout();
   renderTabs();
   updateTitle();
   updateButtons();
@@ -259,6 +295,12 @@ function startEdit(initial: string | null, mode: "enter" | "edit") {
   editor.style.minWidth = `${r.w + 1}px`;
   editor.style.width = `${r.w + 1}px`;
   editor.style.height = `${r.h + 1}px`;
+  const es = grid.editorStyle(p);
+  editor.style.font = es.font;
+  editor.style.lineHeight = "1.25";
+  editor.style.textAlign = es.align;
+  editor.style.whiteSpace = es.wrap ? "pre-wrap" : "pre";
+  editor.dataset.minH = String(r.h + 1);
   sizeEditor();
   formulaInput.value = editor.value;
   editor.focus();
@@ -270,8 +312,9 @@ function sizeEditor() {
   editor.style.width = editor.style.minWidth;
   const needed = Math.min(editor.scrollWidth + 4, grid.host.clientWidth - editor.offsetLeft - 8);
   if (needed > editor.offsetWidth) editor.style.width = `${needed}px`;
-  const lines = editor.value.split("\n").length;
-  editor.style.height = `${Math.max(23, lines * 18 + 5)}px`;
+  editor.style.height = "auto";
+  const minH = Number(editor.dataset.minH || 23);
+  editor.style.height = `${Math.max(minH, editor.scrollHeight + 2)}px`;
 }
 
 editor.addEventListener("input", () => {
@@ -501,7 +544,9 @@ async function cmdNew() {
   if (!(await confirmDiscard())) return;
   grid.dropCache();
   grid.showFilterButtons = false;
-  applyInfo(await call<BookInfo>("new_book"), 0);
+  const info = await call<BookInfo>("new_book");
+  bookGen++;
+  applyInfo(info, 0);
   grid.select({ row: 0, col: 0 });
 }
 
@@ -513,6 +558,7 @@ async function openPath(path: string) {
     grid.dropCache();
     grid.showFilterButtons = false;
     sheet = -1;
+    bookGen++;
     applyInfo(info, 0);
     grid.select({ row: 0, col: 0 });
     const rows = info.sheets.reduce((n, s) => n + s.dataRows, 0);
@@ -604,9 +650,10 @@ async function openFilterFor(col: number, x: number, y: number) {
   const s = curSheet();
   const header = s.filter?.header ?? s.header;
   let title = colName(col);
-  if (header) {
+  const headerRow = grid.autofilter ? grid.autofilter.row : 0;
+  if (header || grid.autofilter) {
     try {
-      const block = await call<{ text: string[] }>("get_cells", { sheet, r0: 0, r1: 0, c0: col, c1: col });
+      const block = await call<{ text: string[] }>("get_cells", { sheet, r0: headerRow, r1: headerRow, c0: col, c1: col });
       if (block.text[0]) title = `${colName(col)} · ${block.text[0]}`;
     } catch {
       /* ignore */
@@ -634,15 +681,39 @@ grid.onFilterButton = (col, x, y) => openFilterFor(col, x, y);
 
 function cmdFilter() {
   const col = grid.active.col;
+  const host = grid.scroller.getBoundingClientRect();
+  const af = grid.autofilter;
+  if (af && col >= af.c0 && col <= af.c1) {
+    // The file has its own filter row: open the popover under that cell.
+    grid.ensureVisible({ row: af.row, col });
+    const r = grid.cellRect(af.row, col);
+    openFilterFor(col, host.left + Math.max(r.x, 0) + Math.min(r.w, 200) - 18, host.top + r.y + r.h);
+    return;
+  }
   grid.showFilterButtons = true;
   grid.render();
   const r = grid.cellRect(0, col);
-  const host = grid.scroller.getBoundingClientRect();
   openFilterFor(col, host.left + Math.max(r.x, 0) + Math.min(r.w, 200) - 18, host.top + 24);
 }
 
 grid.onColResize = (col, width) => {
+  // Keep the local copy in step, so the next refresh doesn't snap the column back.
+  const widths = curSheet().colWidths;
+  while (widths.length <= col) widths.push(null);
+  widths[col] = width;
   call("set_col_width", { sheet, col, width }).catch(() => {});
+  if (!book.modified) {
+    book.modified = true;
+    updateTitle();
+  }
+};
+
+grid.onRowResize = (row, height) => {
+  call("set_row_height", { sheet, row, height }).catch(() => {});
+  if (!book.modified) {
+    book.modified = true;
+    updateTitle();
+  }
 };
 
 grid.onContextMenu = (x, y) => {
@@ -874,6 +945,7 @@ const commands: Record<string, () => unknown> = {
   print: cmdPrint,
   feedback: () => openFeedback(appInfo),
   updates: () => checkForUpdates(appInfo, true),
+  theme: cmdTheme,
 };
 
 document.querySelectorAll<HTMLButtonElement>("[data-cmd]").forEach((b) => {
@@ -889,6 +961,67 @@ $("#add-sheet").onclick = async () => {
     showError(e);
   }
 };
+
+// ---------------------------------------------------------------- appearance
+
+type ThemeChoice = "system" | "light" | "dark";
+const prefs = {
+  get theme(): ThemeChoice {
+    try {
+      return (localStorage.getItem("theme") as ThemeChoice) || "system";
+    } catch {
+      return "system";
+    }
+  },
+  get lightSheet(): boolean {
+    try {
+      return localStorage.getItem("lightSheet") === "1";
+    } catch {
+      return false;
+    }
+  },
+  save(key: string, value: string) {
+    try {
+      localStorage.setItem(key, value);
+    } catch {
+      /* ignore */
+    }
+  },
+};
+
+function applyTheme() {
+  const t = prefs.theme;
+  if (t === "system") delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = t;
+  grid.host.classList.toggle("light-sheet", prefs.lightSheet);
+  grid.themeChanged();
+}
+
+function cmdTheme() {
+  const btn = document.querySelector<HTMLElement>('[data-cmd="theme"]')!.getBoundingClientRect();
+  const mark = (on: boolean) => (on ? "✓ " : "\u2003 ");
+  const t = prefs.theme;
+  const set = (v: ThemeChoice) => {
+    prefs.save("theme", v);
+    applyTheme();
+  };
+  openMenu(btn.right - 220, btn.bottom + 4, [
+    { label: `${mark(t === "system")}Follow system`, action: () => set("system") },
+    { label: `${mark(t === "light")}Light`, action: () => set("light") },
+    { label: `${mark(t === "dark")}Dark`, action: () => set("dark") },
+    { separator: true },
+    {
+      label: `${mark(prefs.lightSheet)}Light sheet`,
+      hint: "cells stay white",
+      action: () => {
+        prefs.save("lightSheet", prefs.lightSheet ? "0" : "1");
+        applyTheme();
+      },
+    },
+  ]);
+}
+
+applyTheme();
 
 // ---------------------------------------------------------------- startup
 

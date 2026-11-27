@@ -7,7 +7,9 @@ use std::sync::Arc;
 
 use calamine::{CellErrorType, Data, DataRef, Reader};
 
+use crate::layout::BookLayout;
 use crate::sheet::{Cell, Sheet};
+use crate::style::CellStyle;
 use crate::value::{CellError, Value};
 use crate::workbook::{FileFormat, Workbook};
 use crate::{Error, Result};
@@ -37,9 +39,19 @@ pub fn open(path: &Path) -> Result<Workbook> {
             wb
         }
         FileFormat::Xlsx => {
+            // Layout (styles per cell, widths, heights, merges...) is read on a second thread.
+            let layout_file = std::fs::File::open(path)?;
+            let layout = std::thread::spawn(move || {
+                crate::layout::read_book_layout(BufReader::with_capacity(1 << 20, layout_file), u16::MAX as usize + 1)
+            });
             let file = BufReader::with_capacity(1 << 20, std::fs::File::open(path)?);
             let mut x: calamine::Xlsx<_> = calamine::Xlsx::new(file).map_err(|e| Error::Read(e.to_string()))?;
-            Workbook::from_sheets(read_xlsx_sheets(&mut x)?, FileFormat::Xlsx)
+            let (sheets, palette) = read_xlsx_sheets(&mut x)?;
+            let mut wb = Workbook::from_sheets(sheets, FileFormat::Xlsx);
+            if let Ok(layout) = layout.join() {
+                apply_layout(&mut wb, palette, layout);
+            }
+            wb
         }
         _ => {
             let mut s = calamine::open_workbook_auto(path).map_err(|e| Error::Read(e.to_string()))?;
@@ -89,12 +101,16 @@ fn place(rows: &mut Vec<Vec<Cell>>, r: usize, c: usize, cell: Cell) {
 
 /// Fast path for xlsx: one streaming pass yields both cached values and formulas,
 /// and shared strings are de-duplicated into one allocation each.
-fn read_xlsx_sheets<RS: Read + Seek>(x: &mut calamine::Xlsx<RS>) -> Result<Vec<Sheet>> {
+fn read_xlsx_sheets<RS: Read + Seek>(x: &mut calamine::Xlsx<RS>) -> Result<(Vec<Sheet>, Vec<CellStyle>)> {
     let names = x.sheet_names();
     let mut out = Vec::with_capacity(names.len());
     let mut interned: HashMap<usize, Arc<str>> = HashMap::new();
+    let mut palette: Vec<CellStyle> = Vec::new();
     for name in names {
         let mut reader = x.worksheet_cells_reader(&name).map_err(|e| Error::Read(e.to_string()))?;
+        if palette.is_empty() {
+            palette = reader.styles().iter().take(u16::MAX as usize + 1).map(CellStyle::from_calamine).collect();
+        }
         let dims = reader.dimensions();
         let mut rows: Vec<Vec<Cell>> =
             Vec::with_capacity((dims.end.0.saturating_sub(dims.start.0) as usize + 1).min(crate::MAX_ROWS));
@@ -129,7 +145,52 @@ fn read_xlsx_sheets<RS: Read + Seek>(x: &mut calamine::Xlsx<RS>) -> Result<Vec<S
         drop(reader);
         out.push(Sheet::from_rows(name, rows));
     }
-    Ok(out)
+    Ok((out, palette))
+}
+
+/// Merge the separately read layout into the sheets.
+fn apply_layout(wb: &mut Workbook, palette: Vec<CellStyle>, mut layout: BookLayout) {
+    if !palette.is_empty() {
+        wb.styles = palette;
+    }
+    wb.dxfs = std::mem::take(&mut layout.dxfs);
+    let n = wb.styles.len();
+    for sh in wb.sheets.iter_mut() {
+        let Some(l) = layout.sheets.remove(&sh.name) else { continue };
+        for (r, c, s) in l.styles {
+            if (s as usize) < n && (r as usize) < crate::MAX_ROWS && (c as usize) < crate::MAX_COLS {
+                sh.set_style_id(r as usize, c as usize, s);
+            }
+        }
+        sh.default_col_width = l.default_col_width.or(Some(64.0));
+        sh.default_row_height = l.default_row_height.or(Some(20.0));
+        for (c0, c1, w, hidden) in l.cols {
+            let c1 = c1.min(crate::MAX_COLS as u32 - 1);
+            // A range to the last column is really a default width.
+            if c1 as usize == crate::MAX_COLS - 1 && c1 - c0 > 1000 {
+                if !hidden {
+                    if let Some(w) = w {
+                        sh.default_col_width = Some(w);
+                    }
+                }
+                continue;
+            }
+            for c in c0..=c1 {
+                sh.set_col_width(c as usize, if hidden { Some(0.0) } else { w });
+            }
+        }
+        for (r, h, hidden) in l.rows {
+            if (r as usize) < crate::MAX_ROWS {
+                sh.set_row_height(r as usize, if hidden { Some(0.0) } else { h });
+            }
+        }
+        // Merged cells: only multi-cell ranges.
+        sh.merges = l.merges.into_iter().filter(|m| m.r0 != m.r1 || m.c0 != m.c1).collect();
+        sh.freeze = l.freeze;
+        sh.autofilter = l.autofilter;
+        sh.cond = l.cond;
+        sh.hide_grid = !l.show_grid;
+    }
 }
 
 fn data_to_value(d: &Data) -> Value {
@@ -311,41 +372,123 @@ fn write_xlsx(wb: &Workbook, tmp: &Path) -> Result<()> {
     use rust_xlsxwriter::{Format, Formula, Workbook as XWorkbook};
     let werr = |e: rust_xlsxwriter::XlsxError| Error::Write(e.to_string());
     let mut x = XWorkbook::new();
-    let date_fmt = Format::new().set_num_format("yyyy-mm-dd");
-    let datetime_fmt = Format::new().set_num_format("yyyy-mm-dd hh:mm:ss");
+    // One Format per style in use; dates without a number format get a readable one.
+    let formats: Vec<Format> = wb.styles.iter().map(|s| s.to_xlsx()).collect();
+    let date_fmts: Vec<(Format, Format)> = wb
+        .styles
+        .iter()
+        .zip(&formats)
+        .map(|(s, f)| {
+            if s.number_format().is_some() {
+                (f.clone(), f.clone())
+            } else {
+                (f.clone().set_num_format("yyyy-mm-dd"), f.clone().set_num_format("yyyy-mm-dd hh:mm:ss"))
+            }
+        })
+        .collect();
+    let default_fmt = Format::new();
     let mut used = Vec::new();
     for sh in &wb.sheets {
         let ws = x.add_worksheet_with_low_memory().map_err(werr)?;
         ws.set_name(safe_sheet_name(&sh.name, &mut used)).map_err(werr)?;
+        if let Some(h) = sh.default_row_height {
+            ws.set_default_row_height_pixels(h.round().max(1.0) as u32);
+        }
         for (c, w) in sh.col_widths.iter().enumerate() {
-            if let Some(px) = w {
-                ws.set_column_width(c as u16, ((*px as f64 - 5.0) / 7.0).max(0.5)).map_err(werr)?;
+            let c = c as u16;
+            match w {
+                Some(px) if *px <= 0.0 => {
+                    ws.set_column_hidden(c).map_err(werr)?;
+                }
+                Some(px) => {
+                    ws.set_column_width_pixels(c, px.round() as u32).map_err(werr)?;
+                }
+                None => {
+                    if let Some(d) = sh.default_col_width.filter(|d| (*d - 64.0).abs() > 0.5) {
+                        ws.set_column_width_pixels(c, d.round() as u32).map_err(werr)?;
+                    }
+                }
             }
         }
-        for (r, row) in sh.rows.iter().enumerate() {
-            let r = r as u32;
-            for (c, cell) in row.iter().enumerate() {
+        if let Some((r, c)) = sh.freeze {
+            ws.set_freeze_panes(r, c as u16).map_err(werr)?;
+        }
+        if sh.hide_grid {
+            ws.set_screen_gridlines(false);
+        }
+        if let Some(a) = sh.autofilter {
+            ws.autofilter(a.r0, a.c0 as u16, a.r1, a.c1 as u16).map_err(werr)?;
+        }
+        write_cond_formats(ws, sh, wb).map_err(werr)?;
+        let mut merges: Vec<_> = sh.merges.iter().collect();
+        merges.sort_by_key(|m| (m.r0, m.c0));
+        let mut next_merge = 0;
+        let (nrows, _) = sh.extent();
+        let nrows = nrows.max(sh.row_heights.len());
+        for r in 0..nrows {
+            let ri = r as u32;
+            match sh.row_height(r) {
+                Some(h) if h <= 0.0 => {
+                    ws.set_row_hidden(ri).map_err(werr)?;
+                }
+                Some(h) => {
+                    ws.set_row_height_pixels(ri, h.round() as u32).map_err(werr)?;
+                }
+                None => {}
+            }
+            while next_merge < merges.len() && merges[next_merge].r0 == ri {
+                let m = merges[next_merge];
+                let f = formats.get(sh.style_id(r, m.c0 as usize) as usize).unwrap_or(&default_fmt);
+                // The top-left value is written below, over the merge's empty string.
+                let _ = ws.merge_range(m.r0, m.c0 as u16, m.r1, m.c1 as u16, "", f);
+                next_merge += 1;
+            }
+            let row = sh.rows.get(r).map(|v| v.as_slice()).unwrap_or(&[]);
+            let srow = sh.styles.get(r).map(|v| v.as_slice()).unwrap_or(&[]);
+            let width = row.len().max(srow.len());
+            for c in 0..width {
+                let cell = row.get(c).unwrap_or(&Cell::Empty);
+                let sid = srow.get(c).copied().unwrap_or(0) as usize;
+                let fmt = if sid == 0 { None } else { formats.get(sid) };
                 let c = c as u16;
                 match cell {
-                    Cell::Empty => {}
+                    Cell::Empty | Cell::Value(Value::Empty) => {
+                        if let Some(f) = fmt {
+                            ws.write_blank(ri, c, f).map_err(werr)?;
+                        }
+                    }
                     Cell::Value(v) => match v {
                         Value::Empty => {}
                         Value::Number(n) => {
-                            ws.write_number(r, c, *n).map_err(werr)?;
+                            match fmt {
+                                Some(f) => ws.write_number_with_format(ri, c, *n, f),
+                                None => ws.write_number(ri, c, *n),
+                            }
+                            .map_err(werr)?;
                         }
                         Value::Date(n) => {
-                            let f = if n.fract() == 0.0 { &date_fmt } else { &datetime_fmt };
-                            ws.write_number_with_format(r, c, *n, f).map_err(werr)?;
+                            let pair = &date_fmts[sid.min(date_fmts.len() - 1)];
+                            let f = if n.fract() == 0.0 { &pair.0 } else { &pair.1 };
+                            ws.write_number_with_format(ri, c, *n, f).map_err(werr)?;
                         }
                         Value::Text(t) => {
-                            ws.write_string(r, c, t.as_ref()).map_err(werr)?;
+                            match fmt {
+                                Some(f) => ws.write_string_with_format(ri, c, t.as_ref(), f),
+                                None => ws.write_string(ri, c, t.as_ref()),
+                            }
+                            .map_err(werr)?;
                         }
                         Value::Bool(b) => {
-                            ws.write_boolean(r, c, *b).map_err(werr)?;
+                            match fmt {
+                                Some(f) => ws.write_boolean_with_format(ri, c, *b, f),
+                                None => ws.write_boolean(ri, c, *b),
+                            }
+                            .map_err(werr)?;
                         }
                         Value::Error(e) => {
                             let src = if *e == CellError::NA { "=NA()".to_string() } else { format!("=\"{}\"", e.as_str()) };
-                            ws.write_formula(r, c, Formula::new(src).set_result(e.as_str())).map_err(werr)?;
+                            let formula = Formula::new(src).set_result(e.as_str());
+                            ws.write_formula_with_format(ri, c, formula, fmt.unwrap_or(&default_fmt)).map_err(werr)?;
                         }
                     },
                     Cell::Formula(f) => {
@@ -355,17 +498,82 @@ fn write_xlsx(wb: &Workbook, tmp: &Path) -> Result<()> {
                             v => v.display(),
                         };
                         let formula = Formula::new(format!("={}", f.src)).set_result(result);
-                        if let Value::Date(n) = f.value {
-                            let fm = if n.fract() == 0.0 { &date_fmt } else { &datetime_fmt };
-                            ws.write_formula_with_format(r, c, formula, fm).map_err(werr)?;
+                        let fm = if let Value::Date(n) = f.value {
+                            let pair = &date_fmts[sid.min(date_fmts.len() - 1)];
+                            if n.fract() == 0.0 {
+                                &pair.0
+                            } else {
+                                &pair.1
+                            }
                         } else {
-                            ws.write_formula(r, c, formula).map_err(werr)?;
-                        }
+                            fmt.unwrap_or(&default_fmt)
+                        };
+                        ws.write_formula_with_format(ri, c, formula, fm).map_err(werr)?;
                     }
                 }
             }
         }
     }
     x.save(tmp).map_err(werr)?;
+    Ok(())
+}
+
+fn write_cond_formats(
+    ws: &mut rust_xlsxwriter::Worksheet,
+    sh: &Sheet,
+    wb: &Workbook,
+) -> std::result::Result<(), rust_xlsxwriter::XlsxError> {
+    use crate::layout::CfTest;
+    use rust_xlsxwriter::{
+        ConditionalFormatBlank, ConditionalFormatCell, ConditionalFormatCellRule as R, ConditionalFormatText,
+        ConditionalFormatTextRule as T,
+    };
+    for cf in &sh.cond {
+        for rule in &cf.rules {
+            let fmt = wb.dxfs.get(rule.dxf as usize).map(|s| s.to_xlsx()).unwrap_or_default();
+            for a in &cf.areas {
+                let (r0, c0, r1, c1) = (a.r0, a.c0 as u16, a.r1, a.c1 as u16);
+                match &rule.test {
+                    CfTest::Cell { op, a: x, b } => {
+                        // Operands are formulas: pass them through verbatim.
+                        let x = rust_xlsxwriter::Formula::new(x.as_str());
+                        let y = rust_xlsxwriter::Formula::new(b.as_deref().unwrap_or("0"));
+                        let r = match op.as_str() {
+                            "eq" => R::EqualTo(x),
+                            "ne" => R::NotEqualTo(x),
+                            "gt" => R::GreaterThan(x),
+                            "ge" => R::GreaterThanOrEqualTo(x),
+                            "lt" => R::LessThan(x),
+                            "le" => R::LessThanOrEqualTo(x),
+                            "between" => R::Between(x, y),
+                            _ => R::NotBetween(x, y),
+                        };
+                        let c = ConditionalFormatCell::new().set_rule(r).set_format(fmt.clone()).set_stop_if_true(rule.stop);
+                        ws.add_conditional_format(r0, c0, r1, c1, &c)?;
+                    }
+                    CfTest::ContainsText { text }
+                    | CfTest::NotContainsText { text }
+                    | CfTest::BeginsWith { text }
+                    | CfTest::EndsWith { text } => {
+                        let r = match &rule.test {
+                            CfTest::ContainsText { .. } => T::Contains(text.clone()),
+                            CfTest::NotContainsText { .. } => T::DoesNotContain(text.clone()),
+                            CfTest::BeginsWith { .. } => T::BeginsWith(text.clone()),
+                            _ => T::EndsWith(text.clone()),
+                        };
+                        let c = ConditionalFormatText::new().set_rule(r).set_format(fmt.clone()).set_stop_if_true(rule.stop);
+                        ws.add_conditional_format(r0, c0, r1, c1, &c)?;
+                    }
+                    CfTest::Blank | CfTest::NotBlank => {
+                        let mut c = ConditionalFormatBlank::new().set_format(fmt.clone()).set_stop_if_true(rule.stop);
+                        if matches!(rule.test, CfTest::NotBlank) {
+                            c = c.invert();
+                        }
+                        ws.add_conditional_format(r0, c0, r1, c1, &c)?;
+                    }
+                }
+            }
+        }
+    }
     Ok(())
 }

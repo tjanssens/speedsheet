@@ -6,6 +6,11 @@ edit it, save it. Built to stay smooth with hundreds of thousands of rows.
 - Opens `.xlsx`, `.xlsm`, `.xls`, `.xlsb`, `.ods`, `.csv`/`.tsv`; saves `.xlsx` and `.csv`
 - Multiple sheets, formulas (90+ common functions), sort, filter, find, undo/redo
 - Copy/paste with Excel, Google Sheets, Numbers and other apps (formulas move along when copied inside SpeedSheet)
+- Excel formatting is shown and kept on save: fonts, bold/italic, colours, fills, borders,
+  alignment and wrapping, number formats, column widths and row heights, merged cells, frozen
+  panes, hidden rows/columns, the file's filter buttons and basic conditional formatting
+- Drag column and row borders to resize them (double-click a column border to fit)
+- Light, dark or "light sheet" appearance (toolbar button next to updates)
 - Print, or save as PDF from the print dialog
 - Feedback button that files a GitHub issue
 
@@ -67,10 +72,11 @@ npm run dev                # open http://localhost:1420
 
 ## Releasing
 
-Bump `version` in `package.json` and `Cargo.toml`, then push a tag:
+Bump `version` in `package.json` and `Cargo.toml`, then push a tag (or run the **Release**
+workflow by hand on `main`, which tags the release `v<version>`):
 
 ```sh
-git tag v0.1.0 && git push origin v0.1.0
+git tag v0.2.0 && git push origin v0.2.0
 ```
 
 The **Release** workflow builds installers for Windows (`.msi`, `.exe`), macOS (Apple Silicon and
@@ -97,11 +103,13 @@ Without these settings releases still build, just without the update channel.
 See [feedback-worker/README.md](feedback-worker/README.md). Without the proxy configured, the button
 opens a prefilled GitHub issue page instead.
 
-## Known limitations (v0.1)
+## Known limitations
 
-- Cell formatting (fonts, colours, borders, number formats other than dates) is not shown and is
-  not written back when saving. Values, formulas, dates, sheets and column widths are kept.
+- Formatting is read from `.xlsx`/`.xlsm` only; `.xls`, `.xlsb` and `.ods` open without it.
+- There are no formatting buttons yet: formatting from the file is shown and kept, not edited.
+- Conditional formatting supports cell-value, text and blank rules; colour scales, data bars,
+  icon sets and formula rules are not shown (and are not written back on save).
 - `.xls`, `.xlsb` and `.ods` files are read-only: saving them writes a new `.xlsx`.
-- No charts, merged cells, conditional formatting, pivot tables or macros.
+- No charts, pivot tables or macros.
 - Unsupported functions show `#NAME?` after the cell is recalculated; their stored values from
   Excel are kept until then.

@@ -71,7 +71,7 @@ jobs:
           # Set it under Settings > Secrets and variables > Actions > Variables.
           SPEEDSHEET_FEEDBACK_URL: ${{ vars.FEEDBACK_URL }}
         with:
-          tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('v__VERSION__-{0}', github.run_number) }}
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || 'v__VERSION__' }}
           releaseName: SpeedSheet v__VERSION__
           releaseBody: |
             Download the installer for your system below.

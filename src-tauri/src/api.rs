@@ -54,15 +54,64 @@ pub fn info(wb: &Workbook) -> BookInfo {
             .iter()
             .map(|s| SheetInfo {
                 name: s.name.clone(),
-                rows: s.view_len(),
+                rows: if s.view.is_some() { s.view_len() } else { s.extent().0 },
                 data_rows: s.row_count(),
-                cols: s.col_count(),
+                cols: s.extent().1,
                 filter: s.filter.clone(),
-                header: s.filter.as_ref().map(|f| f.header).unwrap_or_else(|| ops::guess_header(s)),
+                header: s.autofilter.is_some() || s.filter.as_ref().map(|f| f.header).unwrap_or_else(|| ops::guess_header(s)),
                 col_widths: s.col_widths.clone(),
             })
             .collect(),
     }
+}
+
+/// Layout of a sheet in view coordinates: what the grid needs besides cell contents.
+fn layout(s: &speedsheet_core::Sheet) -> Json {
+    // Row heights as runs of [first view row, count, height px].
+    let mut runs: Vec<(usize, usize, f32)> = Vec::new();
+    let mut push = |vr: usize, h: f32| match runs.last_mut() {
+        Some(last) if last.0 + last.1 == vr && last.2 == h => last.1 += 1,
+        _ => runs.push((vr, 1, h)),
+    };
+    match &s.view {
+        None => {
+            for (r, h) in s.row_heights.iter().enumerate() {
+                if let Some(h) = h {
+                    push(r, *h);
+                }
+            }
+        }
+        Some(v) => {
+            if !s.row_heights.is_empty() {
+                for (vr, &r) in v.iter().enumerate() {
+                    if let Some(h) = s.row_height(r as usize) {
+                        push(vr, h);
+                    }
+                }
+            }
+        }
+    }
+    let merges: Vec<Json> = s
+        .merges
+        .iter()
+        .filter_map(|m| {
+            let v0 = s.view_row(m.r0 as usize)?;
+            let v1 = s.view_row(m.r1 as usize)?;
+            (v1 - v0 == (m.r1 - m.r0) as usize).then(|| json!({ "r0": v0, "c0": m.c0, "r1": v1, "c1": m.c1 }))
+        })
+        .collect();
+    let autofilter = s
+        .autofilter
+        .and_then(|a| s.view_row(a.r0 as usize).map(|vr| json!({ "row": vr, "dataRow": a.r0, "c0": a.c0, "c1": a.c1 })));
+    json!({
+        "rowHeights": runs,
+        "defaultRowHeight": s.default_row_height,
+        "defaultColWidth": s.default_col_width,
+        "merges": merges,
+        "freeze": s.freeze,
+        "autofilter": autofilter,
+        "hideGrid": s.hide_grid,
+    })
 }
 
 #[derive(Serialize)]
@@ -151,7 +200,7 @@ pub fn dispatch(wb: &mut Workbook, cmd: &str, a: Json) -> Result<Json, String> {
         "get_cells" => {
             let r: Rect = args(a)?;
             sheet_ok(wb, r.sheet)?;
-            ok(ops::block(&wb.sheets[r.sheet], r.r0, r.r1, r.c0, r.c1))
+            ok(ops::block(wb, r.sheet, r.r0, r.r1, r.c0, r.c1))
         }
         "get_input" => {
             let At { sheet, row, col } = args(a)?;
@@ -200,7 +249,7 @@ pub fn dispatch(wb: &mut Workbook, cmd: &str, a: Json) -> Result<Json, String> {
         "copy_range" => {
             let r: Rect = args(a)?;
             sheet_ok(wb, r.sheet)?;
-            ok(ops::copy(&wb.sheets[r.sheet], r.r0, r.c0, r.r1, r.c1))
+            ok(ops::copy(wb, r.sheet, r.r0, r.c0, r.r1, r.c1))
         }
         "clear_range" => {
             let r: Rect = args(a)?;
@@ -300,6 +349,27 @@ pub fn dispatch(wb: &mut Workbook, cmd: &str, a: Json) -> Result<Json, String> {
             wb.sheets[sheet].set_col_width(col, Some(width));
             wb.modified = true;
             ok(())
+        }
+        "set_row_height" => {
+            #[derive(Deserialize)]
+            struct A {
+                sheet: usize,
+                row: usize,
+                height: Option<f32>,
+            }
+            let A { sheet, row, height } = args(a)?;
+            sheet_ok(wb, sheet)?;
+            let sh = &mut wb.sheets[sheet];
+            let r = sh.data_row(row).ok_or("no such row")?;
+            sh.set_row_height(r, height);
+            wb.modified = true;
+            ok(())
+        }
+        "get_styles" => ok(json!({ "styles": wb.styles, "dxfs": wb.dxfs })),
+        "get_layout" => {
+            let SheetArg { sheet } = args(a)?;
+            sheet_ok(wb, sheet)?;
+            ok(layout(&wb.sheets[sheet]))
         }
         "print_html" => {
             let r: Rect = args(a)?;

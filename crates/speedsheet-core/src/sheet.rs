@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use crate::filter::Filter;
+use crate::layout::{Area, CondFormat};
 use crate::value::Value;
 
 /// A formula cell: source text (without the leading '=') and its last computed value.
@@ -87,6 +88,20 @@ pub struct Sheet {
     /// Active filter (non-destructive). When set, `view` maps visible rows to data rows.
     pub filter: Option<Filter>,
     pub view: Option<Vec<u32>>,
+    /// Style id per cell (index into `Workbook::styles`, 0 = default). Rows/cols beyond the end are 0.
+    pub styles: Vec<Vec<u16>>,
+    /// Row heights in pixels (None = default, 0 = hidden). Per data row.
+    pub row_heights: Vec<Option<f32>>,
+    /// Defaults from the file, in pixels (None = the app's defaults).
+    pub default_col_width: Option<f32>,
+    pub default_row_height: Option<f32>,
+    pub merges: Vec<Area>,
+    /// Frozen (rows, cols) at the top/left.
+    pub freeze: Option<(u32, u32)>,
+    /// The file's autofilter range; its first row holds the filter buttons.
+    pub autofilter: Option<Area>,
+    pub cond: Vec<CondFormat>,
+    pub hide_grid: bool,
     cols_cache: usize,
 }
 
@@ -196,6 +211,59 @@ impl Sheet {
             self.col_widths.resize(col + 1, None);
         }
         self.col_widths[col] = width;
+    }
+
+    pub fn row_height(&self, row: usize) -> Option<f32> {
+        self.row_heights.get(row).copied().flatten()
+    }
+
+    pub fn set_row_height(&mut self, row: usize, height: Option<f32>) {
+        if self.row_heights.len() <= row {
+            if height.is_none() {
+                return;
+            }
+            self.row_heights.resize(row + 1, None);
+        }
+        self.row_heights[row] = height;
+    }
+
+    pub fn style_id(&self, row: usize, col: usize) -> u16 {
+        self.styles.get(row).and_then(|r| r.get(col)).copied().unwrap_or(0)
+    }
+
+    pub fn set_style_id(&mut self, row: usize, col: usize, id: u16) -> u16 {
+        if self.style_id(row, col) == id {
+            return id;
+        }
+        if self.styles.len() <= row {
+            self.styles.resize_with(row + 1, Vec::new);
+        }
+        let r = &mut self.styles[row];
+        if r.len() <= col {
+            r.resize(col + 1, 0);
+        }
+        std::mem::replace(&mut r[col], id)
+    }
+
+    /// Rows and columns that have content or formatting.
+    pub fn extent(&self) -> (usize, usize) {
+        let rows = self.rows.len().max(self.styles.len());
+        let cols = self.cols_cache.max(self.styles.iter().map(|r| r.len()).max().unwrap_or(0));
+        (rows, cols)
+    }
+
+    /// First data row below the header: the autofilter's header row from the file, else row 0
+    /// when `header` is set.
+    pub fn data_start(&self, header: bool) -> usize {
+        match self.autofilter {
+            Some(a) => a.r0 as usize + 1,
+            None => header as usize,
+        }
+    }
+
+    /// The merged range whose top-left cell is (row, col), or that covers it.
+    pub fn merge_at(&self, row: u32, col: u32) -> Option<&Area> {
+        self.merges.iter().find(|m| m.contains(row, col))
     }
 }
 

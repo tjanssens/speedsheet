@@ -8,8 +8,11 @@ pub mod filter;
 pub mod formula;
 pub mod input;
 pub mod io;
+pub mod layout;
+pub mod numfmt;
 pub mod ops;
 pub mod sheet;
+pub mod style;
 pub mod value;
 pub mod workbook;
 

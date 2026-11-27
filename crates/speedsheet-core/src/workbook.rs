@@ -9,6 +9,7 @@ use crate::filter::{compute_view, contains_ci, Filter};
 use crate::formula::parser::shift_formula;
 use crate::formula::{self, DepIndex, Pos};
 use crate::sheet::{Cell, Sheet};
+use crate::style::CellStyle;
 use crate::value::Value;
 use crate::{Error, Result};
 
@@ -46,6 +47,10 @@ pub struct Workbook {
     pub format: FileFormat,
     pub csv_delimiter: u8,
     pub modified: bool,
+    /// Cell formats; sheets refer to them by index. Index 0 is the default format.
+    pub styles: Vec<CellStyle>,
+    /// Formats applied by conditional formatting rules.
+    pub dxfs: Vec<CellStyle>,
     undo: Vec<Action>,
     redo: Vec<Action>,
     deps: Option<DepIndex>,
@@ -88,6 +93,8 @@ impl Workbook {
             format,
             csv_delimiter: b',',
             modified: false,
+            styles: vec![CellStyle::default()],
+            dxfs: Vec::new(),
             undo: Vec::new(),
             redo: Vec::new(),
             deps: None,
@@ -265,7 +272,7 @@ impl Workbook {
     /// references are shifted, like Excel. Empty cells always go last.
     pub fn sort(&mut self, sheet: usize, col: usize, ascending: bool, header: bool) -> Result<Change> {
         let sh = self.sheet_checked(sheet)?;
-        let start = if header { 1 } else { 0 };
+        let start = sh.data_start(header);
         let n = sh.row_count().saturating_sub(start);
         if n < 2 {
             return Ok(Change { sheet, ..Default::default() });
@@ -314,6 +321,19 @@ impl Workbook {
                 }
             }
             sh.rows[start + i] = row;
+        }
+        // Cell formatting moves with the rows, like in Excel.
+        if sh.styles.len() > start {
+            if sh.styles.len() < start + perm.len() {
+                sh.styles.resize_with(start + perm.len(), Vec::new);
+            }
+            let mut old: Vec<Vec<u16>> = sh.styles[start..start + perm.len()].iter_mut().map(std::mem::take).collect();
+            for (i, &p) in perm.iter().enumerate() {
+                sh.styles[start + i] = std::mem::take(&mut old[p as usize]);
+            }
+            while sh.styles.last().is_some_and(|r| r.is_empty()) {
+                sh.styles.pop();
+            }
         }
         self.deps = None;
     }
