@@ -11,7 +11,7 @@ use crate::layout::BookLayout;
 use crate::sheet::{Cell, Sheet};
 use crate::style::CellStyle;
 use crate::value::{CellError, Value};
-use crate::workbook::{FileFormat, Workbook};
+use crate::workbook::{DefinedName, FileFormat, VbaProject, Workbook};
 use crate::{Error, Result};
 
 pub fn format_for_path(path: &Path) -> Result<FileFormat> {
@@ -46,11 +46,25 @@ pub fn open(path: &Path) -> Result<Workbook> {
             });
             let file = BufReader::with_capacity(1 << 20, std::fs::File::open(path)?);
             let mut x: calamine::Xlsx<_> = calamine::Xlsx::new(file).map_err(|e| Error::Read(e.to_string()))?;
-            let (sheets, palette) = read_xlsx_sheets(&mut x)?;
-            let mut wb = Workbook::from_sheets(sheets, FileFormat::Xlsx);
-            if let Ok(layout) = layout.join() {
-                apply_layout(&mut wb, palette, layout);
+            let (mut sheets, palette) = read_xlsx_sheets(&mut x)?;
+            let mut layout = layout.join().unwrap_or_else(|_| {
+                let mut l = BookLayout::default();
+                l.losses.insert(crate::layout::UNCHECKED);
+                l
+            });
+            // Names first: formulas without a cached value are computed when the workbook is built.
+            let names = take_names(&mut sheets, &mut layout);
+            let mut wb = Workbook::from_sheets_named(sheets, FileFormat::Xlsx, names);
+            let macro_file = is_macro_path(path);
+            if let Some(project) = layout.vba.take() {
+                if macro_file {
+                    wb.vba =
+                        Some(VbaProject { project, signature: layout.vba_signature.take(), codename: layout.codename.take() });
+                } else {
+                    layout.losses.insert("Macros (VBA)");
+                }
             }
+            apply_layout(&mut wb, palette, layout);
             wb
         }
         _ => {
@@ -61,6 +75,37 @@ pub fn open(path: &Path) -> Result<Workbook> {
     wb.path = Some(path.to_path_buf());
     wb.modified = false;
     Ok(wb)
+}
+
+/// .xlsm / .xltm: a macro-enabled package.
+fn is_macro_path(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("xlsm") || e.eq_ignore_ascii_case("xltm"))
+}
+
+/// Can this defined name be written back?
+fn name_writable(name: &str, formula: &str) -> bool {
+    // Names pointing into other workbooks would dangle: their links are not kept.
+    rust_xlsxwriter::utility::check_name(name).is_ok() && !formula.contains('[')
+}
+
+/// Move the defined names read from workbook.xml to their sheets; returns the workbook-wide ones.
+fn take_names(sheets: &mut [Sheet], layout: &mut BookLayout) -> Vec<DefinedName> {
+    let mut global = Vec::new();
+    for n in std::mem::take(&mut layout.names) {
+        if !name_writable(&n.name, &n.formula) {
+            layout.losses.insert("Some defined names");
+        }
+        let d = DefinedName { name: n.name, formula: n.formula, hidden: n.hidden };
+        match n.sheet {
+            None => global.push(d),
+            Some(s) => {
+                if let Some(sh) = sheets.iter_mut().find(|x| x.name == s) {
+                    sh.names.push(d);
+                }
+            }
+        }
+    }
+    global
 }
 
 fn sheet_name_from_path(path: &Path) -> String {
@@ -154,9 +199,12 @@ fn apply_layout(wb: &mut Workbook, palette: Vec<CellStyle>, mut layout: BookLayo
         wb.styles = palette;
     }
     wb.dxfs = std::mem::take(&mut layout.dxfs);
+    let mut losses = std::mem::take(&mut layout.losses);
     let n = wb.styles.len();
     for sh in wb.sheets.iter_mut() {
         let Some(l) = layout.sheets.remove(&sh.name) else { continue };
+        losses.extend(l.losses.iter());
+        sh.codename = l.codename;
         for (r, c, s) in l.styles {
             if (s as usize) < n && (r as usize) < crate::MAX_ROWS && (c as usize) < crate::MAX_COLS {
                 sh.set_style_id(r as usize, c as usize, s);
@@ -191,6 +239,7 @@ fn apply_layout(wb: &mut Workbook, palette: Vec<CellStyle>, mut layout: BookLayo
         sh.cond = l.cond;
         sh.hide_grid = !l.show_grid;
     }
+    wb.losses = losses.into_iter().map(String::from).collect();
 }
 
 fn data_to_value(d: &Data) -> Value {
@@ -308,17 +357,71 @@ pub fn read_csv(bytes: &[u8], name: String, delimiter: Option<u8>) -> Result<(Sh
     Ok((Sheet::from_rows(name, rows), delim))
 }
 
+/// What saving to a path writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SaveKind {
+    Xlsx,
+    /// Macro-enabled workbook: needs the macro project of the opened file.
+    Xlsm,
+    Csv,
+}
+
+fn save_kind(path: &Path) -> Result<SaveKind> {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    Ok(match ext.as_str() {
+        "xlsx" => SaveKind::Xlsx,
+        "xlsm" => SaveKind::Xlsm,
+        "csv" | "tsv" | "txt" => SaveKind::Csv,
+        _ => return Err(Error::Unsupported("can only save as .xlsx, .xlsm (with macros) or .csv".into())),
+    })
+}
+
+/// Can `wb` be saved back to the file it was opened from, in its own format?
+/// (Not: .xls/.ods/.xlsb, templates, or an .xlsm whose macros could not be read.)
+pub fn can_save_in_place(wb: &Workbook) -> bool {
+    let Some(path) = &wb.path else { return false };
+    wb.format.writable()
+        && match save_kind(path) {
+            Ok(SaveKind::Xlsm) => wb.vba.is_some(),
+            Ok(_) => true,
+            Err(_) => false,
+        }
+}
+
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
+}
+
 /// Save to `path`. CSV writes only `active_sheet`. The file is written to a temporary
 /// name first and then renamed, so a failed save never destroys the original.
+///
+/// Saving over the opened file is refused with [`Error::WouldLoseData`] when that file holds
+/// things SpeedSheet cannot keep ([`Workbook::losses`]); [`save_anyway`] overrides that after
+/// the user agreed.
 pub fn save(wb: &mut Workbook, path: &Path, active_sheet: usize) -> Result<()> {
-    let format = format_for_path(path)?;
-    if !format.writable() {
-        return Err(Error::Unsupported("can only save as .xlsx or .csv".into()));
+    if !wb.losses.is_empty() && wb.path.as_deref().is_some_and(|p| same_file(p, path)) {
+        return Err(Error::WouldLoseData(wb.losses.clone()));
     }
+    save_anyway(wb, path, active_sheet)
+}
+
+/// [`save`] without the check for losses.
+pub fn save_anyway(wb: &mut Workbook, path: &Path, active_sheet: usize) -> Result<()> {
+    let kind = save_kind(path)?;
+    if kind == SaveKind::Xlsm && wb.vba.is_none() {
+        // Without a macro project the file would be a plain xlsx that Excel refuses to open
+        // under an .xlsm name.
+        return Err(Error::Unsupported("this workbook has no macros: save it as .xlsx".into()));
+    }
+    let format = if kind == SaveKind::Csv { FileFormat::Csv } else { FileFormat::Xlsx };
     let tmp = path.with_extension(format!("{}.speedsheet-tmp", path.extension().and_then(|e| e.to_str()).unwrap_or("")));
-    let res = match format {
-        FileFormat::Csv => write_csv(wb, &tmp, active_sheet, path),
-        _ => write_xlsx(wb, &tmp),
+    let res = match kind {
+        SaveKind::Csv => write_csv(wb, &tmp, active_sheet, path),
+        SaveKind::Xlsx => write_xlsx(wb, &tmp, false),
+        SaveKind::Xlsm => write_xlsx(wb, &tmp, true),
     };
     if let Err(e) = res {
         let _ = std::fs::remove_file(&tmp);
@@ -328,6 +431,8 @@ pub fn save(wb: &mut Workbook, path: &Path, active_sheet: usize) -> Result<()> {
     wb.path = Some(path.to_path_buf());
     wb.format = format;
     wb.modified = false;
+    // The file on disk now holds exactly what the workbook does.
+    wb.losses.clear();
     Ok(())
 }
 
@@ -368,10 +473,46 @@ fn safe_sheet_name(name: &str, used: &mut Vec<String>) -> String {
     n
 }
 
-fn write_xlsx(wb: &Workbook, tmp: &Path) -> Result<()> {
+/// Write the macro project next to `tmp` (rust_xlsxwriter reads it from a file) and add it.
+fn add_vba(x: &mut rust_xlsxwriter::Workbook, vba: &VbaProject, tmp: &Path) -> Result<()> {
+    let werr = |e: rust_xlsxwriter::XlsxError| Error::Write(e.to_string());
+    let bin = tmp.with_extension("vba-tmp");
+    let sig = tmp.with_extension("vbasig-tmp");
+    std::fs::write(&bin, &vba.project)?;
+    let res = match &vba.signature {
+        Some(s) => std::fs::write(&sig, s)
+            .map_err(Error::from)
+            .and_then(|_| x.add_vba_project_with_signature(&bin, &sig).map(|_| ()).map_err(werr)),
+        None => x.add_vba_project(&bin).map(|_| ()).map_err(werr),
+    };
+    let _ = std::fs::remove_file(&bin);
+    let _ = std::fs::remove_file(&sig);
+    res?;
+    if let Some(c) = &vba.codename {
+        x.set_vba_name(c.as_str()).map_err(werr)?;
+    }
+    Ok(())
+}
+
+/// Excel's `Sheet!Name` form for a sheet-local name.
+fn local_name(sheet: &str, name: &str) -> String {
+    let plain = sheet.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.');
+    if plain {
+        format!("{sheet}!{name}")
+    } else {
+        format!("'{}'!{name}", sheet.replace('\'', "''"))
+    }
+}
+
+fn write_xlsx(wb: &Workbook, tmp: &Path, macros: bool) -> Result<()> {
     use rust_xlsxwriter::{Format, Formula, Workbook as XWorkbook};
     let werr = |e: rust_xlsxwriter::XlsxError| Error::Write(e.to_string());
     let mut x = XWorkbook::new();
+    if macros {
+        if let Some(vba) = &wb.vba {
+            add_vba(&mut x, vba, tmp)?;
+        }
+    }
     // One Format per style in use; dates without a number format get a readable one.
     let formats: Vec<Format> = wb.styles.iter().map(|s| s.to_xlsx()).collect();
     let date_fmts: Vec<(Format, Format)> = wb
@@ -388,9 +529,18 @@ fn write_xlsx(wb: &Workbook, tmp: &Path) -> Result<()> {
         .collect();
     let default_fmt = Format::new();
     let mut used = Vec::new();
+    // Defined names, with sheet-local ones under the sheet's name as written.
+    let mut defined: Vec<(String, &str)> = wb.names.iter().map(|n| (n.name.clone(), n.formula.as_str())).collect();
     for sh in &wb.sheets {
         let ws = x.add_worksheet_with_low_memory().map_err(werr)?;
-        ws.set_name(safe_sheet_name(&sh.name, &mut used)).map_err(werr)?;
+        let written = safe_sheet_name(&sh.name, &mut used);
+        defined.extend(sh.names.iter().map(|n| (local_name(&written, &n.name), n.formula.as_str())));
+        ws.set_name(written).map_err(werr)?;
+        if macros && wb.vba.is_some() {
+            if let Some(c) = &sh.codename {
+                ws.set_vba_name(c.as_str()).map_err(werr)?;
+            }
+        }
         if let Some(h) = sh.default_row_height {
             ws.set_default_row_height_pixels(h.round().max(1.0) as u32);
         }
@@ -512,6 +662,13 @@ fn write_xlsx(wb: &Workbook, tmp: &Path) -> Result<()> {
                     }
                 }
             }
+        }
+    }
+    for (name, formula) in defined {
+        let bare = name.rsplit('!').next().unwrap_or(&name);
+        // Names that cannot be written were reported in `Workbook::losses` when the file opened.
+        if name_writable(bare, formula) {
+            x.define_name(name, &format!("={formula}")).map_err(werr)?;
         }
     }
     x.save(tmp).map_err(werr)?;

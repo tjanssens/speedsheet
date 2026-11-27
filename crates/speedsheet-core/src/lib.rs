@@ -43,6 +43,9 @@ pub enum Error {
     InvalidName(String),
     #[error("a workbook needs at least one sheet")]
     LastSheet,
+    /// Saving over the opened file would remove these features (see `Workbook::losses`).
+    #[error("saving over the original file would remove: {}", .0.join(", "))]
+    WouldLoseData(Vec<String>),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

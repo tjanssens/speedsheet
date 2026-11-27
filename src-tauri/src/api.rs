@@ -32,6 +32,10 @@ pub struct BookInfo {
     pub format: FileFormat,
     pub writable: bool,
     pub modified: bool,
+    /// What saving over the opened file would remove (charts, data validation, ...).
+    pub losses: Vec<String>,
+    /// The workbook carries macros (.xlsm), so it can be saved as .xlsm.
+    pub macros: bool,
     pub can_undo: bool,
     pub can_redo: bool,
     pub sheets: Vec<SheetInfo>,
@@ -47,8 +51,10 @@ pub fn info(wb: &Workbook) -> BookInfo {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "Untitled".into()),
         format: wb.format,
-        writable: wb.format.writable(),
+        writable: io::can_save_in_place(wb),
         modified: wb.modified,
+        losses: wb.losses.clone(),
+        macros: wb.vba.is_some(),
         can_undo: wb.can_undo(),
         can_redo: wb.can_redo(),
         sheets: wb
@@ -190,13 +196,20 @@ pub fn dispatch(wb: &mut Workbook, cmd: &str, a: Json) -> Result<Json, String> {
             struct A {
                 path: Option<String>,
                 sheet: usize,
+                /// The user agreed to lose what `BookInfo::losses` lists.
+                #[serde(default)]
+                force: bool,
             }
-            let A { path, sheet } = args(a)?;
+            let A { path, sheet, force } = args(a)?;
             let target = match path {
                 Some(p) => PathBuf::from(p),
                 None => wb.path.clone().ok_or("no file name yet")?,
             };
-            io::save(wb, &target, sheet).map_err(e)?;
+            if force {
+                io::save_anyway(wb, &target, sheet).map_err(e)?;
+            } else {
+                io::save(wb, &target, sheet).map_err(e)?;
+            }
             ok(info(wb))
         }
         "get_cells" => {

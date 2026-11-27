@@ -88,6 +88,10 @@ export interface BookInfo {
   format: "xlsx" | "xls" | "xlsb" | "ods" | "csv" | "new";
   writable: boolean;
   modified: boolean;
+  /** What saving over the opened file would remove (charts, data validation, ...). */
+  losses: string[];
+  /** The workbook has macros, so it can be saved as .xlsm. */
+  macros: boolean;
   canUndo: boolean;
   canRedo: boolean;
   sheets: SheetInfo[];

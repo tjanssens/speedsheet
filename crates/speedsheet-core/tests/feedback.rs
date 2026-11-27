@@ -240,3 +240,147 @@ fn today_uses_the_local_date() {
     // Allow for the test running across midnight.
     assert!(got == expect || got == expect + 1.0, "TODAY()={got}, local date={expect}");
 }
+
+// ---- Saving never silently drops what SpeedSheet cannot keep.
+
+fn zip_entry(path: &std::path::Path, name: &str) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut z = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
+    let mut f = z.by_name(name).ok()?;
+    let mut v = Vec::new();
+    f.read_to_end(&mut v).unwrap();
+    Some(v)
+}
+
+/// The reported file: a named range, a drop-down list, a hyperlink and a note (plus a chart).
+fn rich_file(path: &std::path::Path) {
+    use rust_xlsxwriter::{Chart, DataValidation, Formula, Note, Workbook as X};
+    let mut x = X::new();
+    let ws = x.add_worksheet();
+    ws.write_number(0, 1, 0.21).unwrap();
+    ws.write_formula(1, 0, Formula::new("=Rate*100").set_result("21")).unwrap();
+    ws.add_data_validation(2, 0, 9, 0, &DataValidation::new().allow_list_strings(&["yes", "no"]).unwrap()).unwrap();
+    ws.write_url(3, 1, "https://example.com").unwrap();
+    ws.insert_note(0, 1, &Note::new("the VAT rate")).unwrap();
+    let mut chart = Chart::new_column();
+    chart.add_series().set_values("Sheet1!$B$1:$B$3");
+    ws.insert_chart(5, 3, &chart).unwrap();
+    x.define_name("Rate", "=Sheet1!$B$1").unwrap();
+    x.save(path).unwrap();
+}
+
+#[test]
+fn saving_over_a_file_with_unkept_features_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("rich.xlsx");
+    rich_file(&p);
+    let mut wb = speedsheet_core::io::open(&p).unwrap();
+    for what in ["Data validation (drop-down lists)", "Hyperlinks", "Notes (comments)", "Charts"] {
+        assert!(wb.losses.iter().any(|l| l == what), "{what} missing from {:?}", wb.losses);
+    }
+    assert!(!wb.losses.iter().any(|l| l.contains("name")), "defined names are kept: {:?}", wb.losses);
+    assert!(speedsheet_core::io::can_save_in_place(&wb));
+    let before = std::fs::read(&p).unwrap();
+    set(&mut wb, 0, 0, 0, "edit");
+    match speedsheet_core::io::save(&mut wb, &p, 0) {
+        Err(speedsheet_core::Error::WouldLoseData(l)) => assert_eq!(l, wb.losses),
+        other => panic!("expected WouldLoseData, got {other:?}"),
+    }
+    assert_eq!(std::fs::read(&p).unwrap(), before, "the original file is untouched");
+    // A copy is fine: the original keeps everything.
+    let copy = dir.path().join("copy.xlsx");
+    speedsheet_core::io::save(&mut wb, &copy, 0).unwrap();
+    assert!(wb.losses.is_empty(), "the copy holds exactly what the workbook does");
+    // Overwriting after the user agreed works too.
+    let mut wb = speedsheet_core::io::open(&p).unwrap();
+    speedsheet_core::io::save_anyway(&mut wb, &p, 0).unwrap();
+    assert!(speedsheet_core::io::open(&p).unwrap().losses.is_empty());
+}
+
+#[test]
+fn defined_names_survive_open_and_save() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("rich.xlsx");
+    rich_file(&p);
+    let mut wb = speedsheet_core::io::open(&p).unwrap();
+    assert_eq!(wb.names, vec![name("Rate", "Sheet1!$B$1")]);
+    assert_eq!(show(&wb, 0, 1, 0), "21", "=Rate*100 evaluates");
+    set(&mut wb, 0, 0, 1, "0.06");
+    assert_eq!(show(&wb, 0, 1, 0), "6", "and follows its cell");
+    wb.sheets[0].names.push(name("Local", "Sheet1!$B$1*2"));
+    let copy = dir.path().join("copy.xlsx");
+    speedsheet_core::io::save(&mut wb, &copy, 0).unwrap();
+    let back = speedsheet_core::io::open(&copy).unwrap();
+    assert_eq!(back.names, vec![name("Rate", "Sheet1!$B$1")]);
+    assert_eq!(back.sheets[0].names, vec![name("Local", "Sheet1!$B$1*2")]);
+    assert_eq!(back.sheets[0].cell(1, 0).input_text(), "=Rate*100");
+    assert_eq!(show(&back, 0, 1, 0), "6");
+}
+
+#[test]
+fn xlsm_keeps_its_macros() {
+    use rust_xlsxwriter::Workbook as X;
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("vbaProject.bin");
+    let project = b"\xd0\xcf\x11\xe0 not a real VBA project, just bytes to carry".to_vec();
+    std::fs::write(&bin, &project).unwrap();
+    let p = dir.path().join("macros.xlsm");
+    let mut x = X::new();
+    x.add_vba_project(&bin).unwrap();
+    x.set_vba_name("MyBook").unwrap();
+    x.add_worksheet().set_vba_name("DataSheet").unwrap().write_number(0, 0, 1.0).unwrap();
+    x.save(&p).unwrap();
+
+    let mut wb = speedsheet_core::io::open(&p).unwrap();
+    assert!(wb.losses.is_empty(), "{:?}", wb.losses);
+    assert!(speedsheet_core::io::can_save_in_place(&wb));
+    set(&mut wb, 0, 0, 0, "2");
+    speedsheet_core::io::save(&mut wb, &p, 0).unwrap();
+    let types = String::from_utf8(zip_entry(&p, "[Content_Types].xml").unwrap()).unwrap();
+    assert!(types.contains("application/vnd.ms-excel.sheet.macroEnabled.main+xml"), "{types}");
+    assert_eq!(zip_entry(&p, "xl/vbaProject.bin").unwrap(), project);
+    let wbxml = String::from_utf8(zip_entry(&p, "xl/workbook.xml").unwrap()).unwrap();
+    assert!(wbxml.contains("codeName=\"MyBook\""), "{wbxml}");
+    let sheet = String::from_utf8(zip_entry(&p, "xl/worksheets/sheet1.xml").unwrap()).unwrap();
+    assert!(sheet.contains("codeName=\"DataSheet\""), "{sheet}");
+    assert_eq!(speedsheet_core::io::open(&p).unwrap().sheets[0].value(0, 0), &Value::Number(2.0));
+
+    // Saved as .xlsx: a plain workbook without macros.
+    let plain = dir.path().join("plain.xlsx");
+    speedsheet_core::io::save(&mut wb, &plain, 0).unwrap();
+    let types = String::from_utf8(zip_entry(&plain, "[Content_Types].xml").unwrap()).unwrap();
+    assert!(!types.contains("macroEnabled"));
+    assert!(zip_entry(&plain, "xl/vbaProject.bin").is_none());
+}
+
+#[test]
+fn xlsm_without_macros_is_never_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut wb = wb_with(&[&["1"]]);
+    let p = dir.path().join("new.xlsm");
+    assert!(matches!(speedsheet_core::io::save(&mut wb, &p, 0), Err(speedsheet_core::Error::Unsupported(_))));
+    assert!(!p.exists());
+    // An .xlsx that pretends to have macros is not trusted either.
+    let x = dir.path().join("t.xltx");
+    assert!(speedsheet_core::io::save(&mut wb, &x, 0).is_err());
+}
+
+#[test]
+fn hidden_sheets_and_rich_text_are_reported() {
+    use rust_xlsxwriter::{Format, Workbook as X};
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("t.xlsx");
+    let mut x = X::new();
+    let bold = Format::new().set_bold();
+    x.add_worksheet().write_rich_string(0, 0, &[(&bold, "bold"), (&Format::default(), " plain")]).unwrap();
+    x.add_worksheet().set_hidden(true);
+    x.add_worksheet().protect();
+    x.save(&p).unwrap();
+    let wb = speedsheet_core::io::open(&p).unwrap();
+    assert_eq!(wb.losses, ["Hidden sheets (they will show)", "Sheet protection", "Text formatting within cells (rich text)"]);
+    // A plain file has nothing to lose.
+    let q = dir.path().join("plain.xlsx");
+    let mut plain = wb_with(&[&["1", "=A1*2"]]);
+    speedsheet_core::io::save(&mut plain, &q, 0).unwrap();
+    assert!(speedsheet_core::io::open(&q).unwrap().losses.is_empty());
+}
