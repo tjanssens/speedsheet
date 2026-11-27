@@ -12,6 +12,7 @@ pub mod io;
 pub mod layout;
 pub mod numfmt;
 pub mod ops;
+pub mod shared;
 pub mod sheet;
 pub mod style;
 pub mod value;

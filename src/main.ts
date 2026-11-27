@@ -1,5 +1,5 @@
-import { call, native, isTauri, errorText } from "./api";
-import type { AppInfo, BookInfo, Copied, EditResult, Filter, FilterCond, Layout, Match, Stats, Styles } from "./api";
+import { call, native, isTauri, errorText, onBackendEvent, closeBrowserView } from "./api";
+import type { AppInfo, BookInfo, Copied, DocChanged, EditResult, Filter, FilterCond, Layout, Match, Peers, Stats, Styles } from "./api";
 import { Grid, colName, parseAddress, type Rect } from "./grid";
 import { openFilterPopover, closePopover, openMenu } from "./popover";
 import { openFeedback } from "./feedback";
@@ -22,6 +22,8 @@ let sheet = 0;
 let editing: null | { mode: "enter" | "edit"; where: "cell" | "bar"; original: string } = null;
 let lastCopy: null | { text: string; row: number; col: number; inputs: string[][]; cut: boolean; sheet: number; rect: Rect } = null;
 let appInfo: AppInfo | null = null;
+/** Other windows on the same file. */
+let peers: Peers = { number: 1, count: 1, peers: [] };
 
 // ---------------------------------------------------------------- helpers
 
@@ -133,7 +135,9 @@ function applyInfo(info: BookInfo, focusSheet = sheet) {
 }
 
 async function updateTitle() {
-  const title = `${book.name}${book.modified ? " •" : ""} — SpeedSheet`;
+  // Like Excel: "Book.xlsx:2" when the file is open in more than one window.
+  const name = peers.count > 1 ? `${book.name}:${peers.number}` : book.name;
+  const title = `${name}${book.modified ? " •" : ""} — SpeedSheet`;
   document.title = title;
   if (isTauri) {
     const { getCurrentWindow } = await import("@tauri-apps/api/window");
@@ -179,6 +183,7 @@ function switchSheet(i: number) {
   sheet = i;
   grid.showFilterButtons = !!book.sheets[i].filter;
   applyInfo(book, i);
+  sendPresence();
 }
 
 function renameTab(i: number, el: HTMLElement) {
@@ -279,7 +284,123 @@ async function updateStatus() {
 grid.onSelectionChange = () => {
   if (editing?.where === "cell") commitEdit(0, 0);
   updateCellUI();
+  sendPresence();
 };
+
+// ---------------------------------------------------------------- other windows on this file
+
+const PEER_COLORS = ["#e8710a", "#9334e6", "#188038", "#d93025", "#e52592", "#12a4af"];
+
+function applyPeers(p: Peers) {
+  const was = peers.count;
+  peers = p;
+  grid.peerCursors = p.peers.flatMap((x) =>
+    x.presence
+      ? [
+          {
+            sheet: x.presence.sheet,
+            active: { row: x.presence.row, col: x.presence.col },
+            rect: { r0: x.presence.r0, c0: x.presence.c0, r1: x.presence.r1, c1: x.presence.c1 },
+            color: PEER_COLORS[(x.number - 1) % PEER_COLORS.length],
+            label: `Window ${x.number}`,
+          },
+        ]
+      : [],
+  );
+  grid.render();
+  if (was !== p.count) updateTitle();
+}
+
+async function refreshPeers() {
+  try {
+    applyPeers(await call<Peers>("peers"));
+  } catch {
+    /* ignore */
+  }
+  sendPresence();
+}
+
+let presenceTimer = 0;
+/** Tell the other windows on this file where this window's cursor is. */
+function sendPresence() {
+  clearTimeout(presenceTimer);
+  presenceTimer = window.setTimeout(() => {
+    if (!book) return;
+    const a = grid.active;
+    const r = grid.selection;
+    call("set_presence", { presence: { sheet, row: a.row, col: a.col, r0: r.r0, c0: r.c0, r1: r.r1, c1: r.c1 } }).catch(() => {});
+  }, 30);
+}
+
+/** Another window on this file changed it: show the new state, keep our own place. */
+function remoteChange(ch: DocChanged) {
+  const oldName = book.sheets[sheet]?.name;
+  let idx = ch.info.sheets.findIndex((s) => s.name === oldName);
+  if (idx < 0) idx = ch.info.sheets.length === book.sheets.length ? sheet : Math.min(sheet, ch.info.sheets.length - 1);
+  const moved = idx !== sheet;
+  if (ch.cmd === "set_filter" || ch.cmd === "sort") grid.dropCache();
+  applyInfo(ch.info, idx);
+  if (moved) sendPresence();
+  loadLayout(true);
+  grid.invalidate();
+}
+
+interface OpenElsewhere {
+  view: string;
+  name: string;
+}
+
+/** The file is open in another window: switch there, or open it here as well (kept in sync). */
+function askAlreadyOpen(other: OpenElsewhere): Promise<"switch" | "here" | "cancel"> {
+  const backdrop = $("#modal-backdrop");
+  const modal = $("#modal");
+  return new Promise((resolve) => {
+    modal.innerHTML = "";
+    const h = document.createElement("h2");
+    h.textContent = "This file is already open";
+    const p = document.createElement("p");
+    p.textContent = `"${other.name}" is already open in another SpeedSheet window.`;
+    const p2 = document.createElement("p");
+    p2.textContent = "If you open it here too, both windows stay in sync: edits show up in both, you see where the other window is, and saving from either window keeps all changes.";
+    const actions = document.createElement("div");
+    actions.className = "actions";
+    const mk = (label: string, cls: string, value: "switch" | "here" | "cancel") => {
+      const b = document.createElement("button");
+      b.className = cls;
+      b.textContent = label;
+      b.dataset.choice = value;
+      b.onclick = () => done(value);
+      return b;
+    };
+    const cancel = mk("Cancel", "bordered", "cancel");
+    const here = mk("Open here too", "bordered", "here");
+    const go = mk("Go to that window", "primary", "switch");
+    actions.append(cancel, here, go);
+    modal.append(h, p, p2, actions);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        done("cancel");
+      }
+    };
+    const done = (v: "switch" | "here" | "cancel") => {
+      document.removeEventListener("keydown", onKey, true);
+      backdrop.hidden = true;
+      modal.innerHTML = "";
+      grid.scroller.focus();
+      resolve(v);
+    };
+    document.addEventListener("keydown", onKey, true);
+    backdrop.hidden = false;
+    go.focus();
+  });
+}
+
+/** Whether this window shows nothing worth keeping (a fresh window opened for a file). */
+function isBlankWindow() {
+  return !book.path && !book.modified && peers.count <= 1;
+}
 
 // ---------------------------------------------------------------- editing
 
@@ -729,7 +850,8 @@ async function clearSelection() {
 const OPEN_EXT = ["xlsx", "xlsm", "xls", "xlsb", "ods", "csv", "tsv", "txt"];
 
 async function confirmDiscard(): Promise<boolean> {
-  if (!book?.modified) return true;
+  // With other windows on the file, the changes stay there.
+  if (!book?.modified || peers.count > 1) return true;
   return confirmDialog(`"${book.name}" has unsaved changes. Discard them?`, "Unsaved changes", "Discard");
 }
 
@@ -741,21 +863,41 @@ async function cmdNew() {
   bookGen++;
   applyInfo(info, 0);
   grid.select({ row: 0, col: 0 });
+  refreshPeers();
 }
 
 async function openPath(path: string) {
+  let shared = false;
+  const other = await call<OpenElsewhere | null>("find_open", { path }).catch(() => null);
+  if (other) {
+    const choice = await askAlreadyOpen(other);
+    if (choice === "cancel") return;
+    if (choice === "switch") {
+      const blank = isBlankWindow();
+      await native("focus_window", { label: other.view }).catch((e) => showError(e, "Can't switch windows"));
+      // A window that was opened just for this file has no reason to stay.
+      if (blank && isTauri) {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        getCurrentWindow().destroy();
+      }
+      return;
+    }
+    shared = true;
+  }
   if (!(await confirmDiscard())) return;
   const t0 = performance.now();
   try {
-    const info = await busy(`Opening ${path.split(/[\\/]/).pop()}…`, () => call<BookInfo>("open_file", { path }));
+    const info = await busy(`Opening ${path.split(/[\\/]/).pop()}…`, () => call<BookInfo>("open_file", { path, shared }));
     grid.dropCache();
     grid.showFilterButtons = false;
     sheet = -1;
     bookGen++;
     applyInfo(info, 0);
     grid.select({ row: 0, col: 0 });
+    refreshPeers();
     const rows = info.sheets.reduce((n, s) => n + s.dataRows, 0);
-    toast(`Opened ${fmtNum(rows)} rows in ${fmtNum(Math.round(performance.now() - t0))} ms`, 2500);
+    if (shared) toast(`Opened ${escapeHtml(info.name)} here too: both windows stay in sync`, 2500);
+    else toast(`Opened ${fmtNum(rows)} rows in ${fmtNum(Math.round(performance.now() - t0))} ms`, 2500);
   } catch (e) {
     showError(e, "Can't open file");
   }
@@ -1123,6 +1265,7 @@ document.addEventListener("keydown", (e) => {
     case "o":
       return run(cmdOpen);
     case "n":
+      if (e.shiftKey && isTauri) return run(() => native("new_window").catch((err) => showError(err)));
       return run(cmdNew);
     case "p":
       return run(cmdPrint);
@@ -1272,23 +1415,26 @@ async function init() {
   applyInfo(book, 0);
   grid.select({ row: 0, col: 0 });
   grid.scroller.focus();
+  onBackendEvent<DocChanged>("doc-changed", remoteChange);
+  onBackendEvent<Peers>("peers", applyPeers);
+  refreshPeers();
   appInfo = (await native<AppInfo>("app_info").catch(() => undefined)) ?? null;
   window.setTimeout(() => checkForUpdates(appInfo, false), 4000);
 
   if (isTauri) {
     const { getCurrentWindow } = await import("@tauri-apps/api/window");
     const { getCurrentWebview } = await import("@tauri-apps/api/webview");
-    const { listen } = await import("@tauri-apps/api/event");
+    const { getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
     const win = getCurrentWindow();
     win.onCloseRequested(async (ev) => {
-      if (!book.modified) return;
+      if (!book.modified || peers.count > 1) return;
       ev.preventDefault();
       if (await confirmDiscard()) win.destroy();
     });
     getCurrentWebview().onDragDropEvent((ev) => {
       if (ev.payload.type === "drop" && ev.payload.paths.length) openPath(ev.payload.paths[0]);
     });
-    listen<string>("open-file", async (ev) => {
+    getCurrentWebviewWindow().listen<string>("open-file", async (ev) => {
       await native("take_pending_open");
       openPath(ev.payload);
     });
@@ -1298,7 +1444,8 @@ async function init() {
 }
 
 window.addEventListener("beforeunload", (e) => {
-  if (!isTauri && book?.modified) e.preventDefault();
+  if (!isTauri && book?.modified && peers.count <= 1) e.preventDefault();
 });
+window.addEventListener("pagehide", closeBrowserView);
 
 init();
