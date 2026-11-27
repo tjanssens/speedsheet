@@ -4,6 +4,8 @@ import { Grid, colName, parseAddress, type Rect } from "./grid";
 import { openFilterPopover, closePopover, openMenu } from "./popover";
 import { openFeedback } from "./feedback";
 import { checkForUpdates } from "./updates";
+import { analyze, findRefs, hintHtml, refText, suggestions } from "./formulaHelp";
+import type { FnInfo } from "./functions";
 
 const $ = <T extends HTMLElement = HTMLElement>(sel: string) => document.querySelector(sel) as T;
 
@@ -306,6 +308,7 @@ function startEdit(initial: string | null, mode: "enter" | "edit") {
   editor.focus();
   const end = editor.value.length;
   editor.setSelectionRange(end, end);
+  updateFormulaHelp();
 }
 
 function sizeEditor() {
@@ -320,11 +323,28 @@ function sizeEditor() {
 editor.addEventListener("input", () => {
   formulaInput.value = editor.value;
   sizeEditor();
+  pointRef = null;
+  updateFormulaHelp();
 });
+formulaInput.addEventListener("input", () => {
+  if (editing?.where === "bar") {
+    pointRef = null;
+    updateFormulaHelp();
+  }
+});
+for (const el of [editor, formulaInput]) {
+  el.addEventListener("click", () => updateFormulaHelp());
+  el.addEventListener("keyup", (ev) => {
+    const e = ev as KeyboardEvent;
+    if (e.key.startsWith("Arrow") || e.key === "Home" || e.key === "End") updateFormulaHelp();
+  });
+  el.addEventListener("keydown", (e) => formulaKeys(e as KeyboardEvent), true);
+}
 
 formulaInput.addEventListener("focus", () => {
   if (editing) return;
   editing = { mode: "edit", where: "bar", original: formulaInput.value };
+  setTimeout(updateFormulaHelp, 0);
 });
 formulaInput.addEventListener("blur", () => {
   if (editing?.where === "bar") commitEdit(0, 0, false);
@@ -349,6 +369,7 @@ async function commitEdit(dr: number, dc: number, refocus = true) {
   const value = where === "cell" ? editor.value : formulaInput.value;
   editing = null;
   editor.hidden = true;
+  endFormulaHelp();
   const { row, col } = grid.active;
   if (refocus) grid.scroller.focus({ preventScroll: true });
   if (dr || dc) grid.advance(dr, dc);
@@ -369,6 +390,7 @@ function cancelEdit() {
   formulaInput.value = editing.original;
   editing = null;
   editor.hidden = true;
+  endFormulaHelp();
   grid.scroller.focus({ preventScroll: true });
 }
 
@@ -410,6 +432,177 @@ editor.addEventListener("keydown", (e) => {
 });
 
 grid.onEditRequest = () => startEdit(null, "edit");
+
+// ---------------------------------------------------------------- formula help
+
+const fxPop = document.createElement("div");
+fxPop.id = "fx-pop";
+fxPop.hidden = true;
+document.body.append(fxPop);
+const fxHint = document.createElement("div");
+fxHint.id = "fx-hint";
+fxHint.hidden = true;
+document.body.append(fxHint);
+
+/** The reference most recently inserted by pointing, so the next pick replaces it. */
+let pointRef: { start: number; end: number; anchor: { row: number; col: number }; cursor: { row: number; col: number } } | null = null;
+let fxList: FnInfo[] = [];
+let fxIndex = 0;
+
+function editInput(): HTMLInputElement | HTMLTextAreaElement {
+  return editing?.where === "bar" ? formulaInput : editor;
+}
+
+function setEditText(text: string, caret: number) {
+  const el = editInput();
+  el.value = text;
+  el.setSelectionRange(caret, caret);
+  if (el === editor) {
+    formulaInput.value = text;
+    sizeEditor();
+  } else editor.value = text;
+}
+
+function placeBelow(div: HTMLElement, el: HTMLElement, offsetY = 0) {
+  const r = el.getBoundingClientRect();
+  div.style.left = `${Math.max(4, Math.min(r.left, window.innerWidth - 380))}px`;
+  div.style.top = `${r.bottom + 2 + offsetY}px`;
+}
+
+function updateFormulaHelp() {
+  if (!editing) return endFormulaHelp();
+  const el = editInput();
+  const text = el.value;
+  const caret = el.selectionStart ?? text.length;
+  const a = analyze(text, caret);
+  // Colored references in the grid.
+  grid.refHighlights = a && !grid.filtered ? findRefs(text).map((r) => ({ rect: r.rect, color: r.color })) : [];
+  // Point mode: clicking a cell inserts its reference.
+  const atPointRef = pointRef !== null && caret === pointRef.end;
+  grid.pointMode = a && (a.insertable || atPointRef) ? { onPick: (r, dragging) => pickRef(r, dragging) } : null;
+  // Function autocomplete.
+  fxList = a?.token ? suggestions(a.token.text) : [];
+  if (fxList.length === 1 && fxList[0].name === a?.token?.text.toUpperCase()) fxList = [];
+  if (fxList.length) {
+    fxIndex = Math.min(fxIndex, fxList.length - 1);
+    fxPop.innerHTML = "";
+    fxList.forEach((f, i) => {
+      const item = document.createElement("div");
+      item.className = "item" + (i === fxIndex ? " sel" : "");
+      item.innerHTML = `<b>${f.name}</b><span>${f.desc}</span>`;
+      item.onmousedown = (e) => {
+        e.preventDefault();
+        fxIndex = i;
+        acceptSuggestion();
+      };
+      fxPop.append(item);
+    });
+    placeBelow(fxPop, el);
+    fxPop.hidden = false;
+  } else {
+    fxPop.hidden = true;
+    fxIndex = 0;
+  }
+  // Argument hint.
+  if (a?.call && fxList.length === 0) {
+    fxHint.innerHTML = hintHtml(a.call.fn, a.call.arg);
+    placeBelow(fxHint, el);
+    fxHint.hidden = false;
+  } else fxHint.hidden = true;
+  grid.render();
+}
+
+function endFormulaHelp() {
+  fxPop.hidden = true;
+  fxHint.hidden = true;
+  fxList = [];
+  pointRef = null;
+  grid.pointMode = null;
+  if (grid.refHighlights.length) {
+    grid.refHighlights = [];
+    grid.render();
+  }
+}
+
+function acceptSuggestion() {
+  const el = editInput();
+  const text = el.value;
+  const caret = el.selectionStart ?? text.length;
+  const a = analyze(text, caret);
+  const f = fxList[fxIndex];
+  if (!a?.token || !f) return;
+  let end = a.token.end;
+  while (end < text.length && /[A-Za-z0-9_.]/.test(text[end])) end++;
+  const hasParen = text[end] === "(";
+  const insert = f.name + (hasParen ? "" : "(");
+  const next = text.slice(0, a.token.start) + insert + text.slice(end);
+  setEditText(next, a.token.start + insert.length + (hasParen ? 1 : 0));
+  fxIndex = 0;
+  updateFormulaHelp();
+}
+
+/** Insert (or replace the last pointed) reference at the caret. */
+function pickRef(r: Rect, dragging: boolean) {
+  const el = editInput();
+  const text = el.value;
+  const caret = el.selectionStart ?? text.length;
+  const ref = refText(r);
+  let start = caret;
+  let end = caret;
+  if (pointRef && caret === pointRef.end) {
+    start = pointRef.start;
+    end = pointRef.end;
+  }
+  const next = text.slice(0, start) + ref + text.slice(end);
+  setEditText(next, start + ref.length);
+  const anchor = dragging && pointRef ? pointRef.anchor : { row: r.r0, col: r.c0 };
+  pointRef = { start, end: start + ref.length, anchor, cursor: { row: r.r1, col: r.c1 } };
+  el.focus();
+  updateFormulaHelp();
+}
+
+/** Keys while editing: autocomplete navigation, and arrow keys pointing at cells in a formula. */
+function formulaKeys(e: KeyboardEvent) {
+  if (!editing) return;
+  const stop = () => {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  };
+  if (!fxPop.hidden && fxList.length) {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      stop();
+      fxIndex = (fxIndex + (e.key === "ArrowDown" ? 1 : -1) + fxList.length) % fxList.length;
+      updateFormulaHelp();
+      return;
+    }
+    if (e.key === "Tab" || (e.key === "Enter" && !e.altKey)) {
+      stop();
+      acceptSuggestion();
+      return;
+    }
+    if (e.key === "Escape") {
+      stop();
+      fxPop.hidden = true;
+      fxList = [];
+      return;
+    }
+  }
+  const dirs: Record<string, [number, number]> = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] };
+  if (e.key in dirs && editing.mode === "enter" && grid.pointMode && !grid.filtered) {
+    stop();
+    const [dr, dc] = dirs[e.key];
+    const base = pointRef?.cursor ?? { row: grid.active.row, col: grid.active.col };
+    const cur = { row: Math.max(0, base.row + dr), col: Math.max(0, base.col + dc) };
+    const anchor = e.shiftKey && pointRef ? pointRef.anchor : cur;
+    const rect = { r0: Math.min(anchor.row, cur.row), c0: Math.min(anchor.col, cur.col), r1: Math.max(anchor.row, cur.row), c1: Math.max(anchor.col, cur.col) };
+    pickRef(rect, e.shiftKey);
+    if (pointRef) {
+      pointRef.anchor = anchor;
+      pointRef.cursor = cur;
+    }
+    grid.ensureVisible(cur);
+  }
+}
 
 nameBox.addEventListener("keydown", (e) => {
   if (e.key === "Enter") {
@@ -713,6 +906,29 @@ grid.onRowResize = (row, height) => {
   if (!book.modified) {
     book.modified = true;
     updateTitle();
+  }
+};
+
+grid.onFill = async (src, dst) => {
+  commitEdit(0, 0);
+  try {
+    const res = await call<EditResult>("fill", { sheet, src, dst });
+    afterEdit(res, false);
+    grid.select({ row: dst.r0, col: dst.c0 }, false, { row: dst.r1, col: dst.c1 });
+  } catch (e) {
+    showError(e, "Can't fill");
+  }
+};
+
+grid.onFillAuto = async (src) => {
+  commitEdit(0, 0);
+  try {
+    const res = await call<{ end: number; result: EditResult } | null>("fill_auto", { sheet, ...src });
+    if (!res) return;
+    afterEdit(res.result, false);
+    grid.select({ row: src.r0, col: src.c0 }, false, { row: res.end, col: src.c1 });
+  } catch (e) {
+    showError(e, "Can't fill");
   }
 };
 

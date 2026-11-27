@@ -10,6 +10,10 @@ edit it, save it. Built to stay smooth with hundreds of thousands of rows.
   alignment and wrapping, number formats, column widths and row heights, merged cells, frozen
   panes, hidden rows/columns, the file's filter buttons and basic conditional formatting
 - Drag column and row borders to resize them (double-click a column border to fit)
+- Fill handle like Excel: drag the corner of a selection to copy or continue series (numbers,
+  dates, "Item 1", day and month names in English and Dutch) and shift formulas; double-click it to fill down
+- Formula help: click or drag cells (or use the arrow keys) while typing a formula to insert their
+  address, coloured references, function autocomplete and argument hints
 - Light, dark or "light sheet" appearance (toolbar button next to updates)
 - Print, or save as PDF from the print dialog
 - Feedback button that files a GitHub issue

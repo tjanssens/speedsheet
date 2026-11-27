@@ -78,7 +78,8 @@ type Hit =
   | { area: "corner" }
   | { area: "col"; col: number; resize: number | null; filterBtn: boolean }
   | { area: "row"; row: number; resize: number | null }
-  | { area: "cell"; row: number; col: number; filterBtn: boolean };
+  | { area: "cell"; row: number; col: number; filterBtn: boolean }
+  | { area: "fill" };
 
 const EMPTY: CellData = { text: "", kind: 0, style: 0, cf: 0 };
 
@@ -177,6 +178,9 @@ export class Grid {
   private frame = 0;
   private drag: null | { kind: "cells" | "cols" | "rows"; start: Pos } = null;
   private resize: null | { kind: "col" | "row"; index: number; start: number; startSize: number } = null;
+  /** Dragging the fill handle: the selection being extended and the target so far. */
+  private fillDrag: null | { src: Rect; dst: Rect } = null;
+  private pointDrag: null | Pos = null;
   private autoScroll = 0;
   private lastMouse = { x: 0, y: 0 };
 
@@ -186,6 +190,14 @@ export class Grid {
   onColResize: (col: number, width: number) => void = () => {};
   onRowResize: (row: number, height: number) => void = () => {};
   onContextMenu: (x: number, y: number) => void = () => {};
+  onFill: (src: Rect, dst: Rect) => void = () => {};
+  onFillAuto: (src: Rect) => void = () => {};
+  /** While a formula is being typed: clicking cells inserts references instead of selecting. */
+  pointMode: null | {
+    onPick: (r: Rect, dragging: boolean) => void;
+  } = null;
+  /** References shown in color while a formula is edited. */
+  refHighlights: { rect: Rect; color: string }[] = [];
 
   constructor(host: HTMLElement) {
     this.host = host;
@@ -205,6 +217,11 @@ export class Grid {
     window.addEventListener("mouseup", () => this.onMouseUp());
     this.scroller.addEventListener("dblclick", (e) => {
       const h = this.hit(e);
+      if (h.area === "fill") {
+        this.fillDrag = null;
+        this.onFillAuto(this.selection);
+        return;
+      }
       if (h.area === "cell" && !h.filterBtn) this.onEditRequest();
       if (h.area === "col" && h.resize !== null) this.autoFit(h.resize);
       if (h.area === "row" && h.resize !== null) {
@@ -601,6 +618,13 @@ export class Grid {
       else if (Math.abs(y - top) <= 3 && row > 0) resize = row - 1;
       return { area: "row", row, resize };
     }
+    // The fill handle: the small square at the bottom-right of the selection.
+    {
+      const s = this.selection;
+      const hx = this.xOf(s.c1 + 1);
+      const hy = this.yOf(s.r1 + 1);
+      if (!this.pointMode && Math.abs(x - hx) <= 5 && Math.abs(y - hy) <= 5) return { area: "fill" };
+    }
     let filterBtn = false;
     const af = this.autofilter;
     if (af && row === af.row && col >= af.c0 && col <= af.c1) {
@@ -746,7 +770,22 @@ export class Grid {
       return;
     }
     const h = this.hit(e);
+    if (this.pointMode && h.area === "cell") {
+      // Formula point mode: the click picks a reference; the editor keeps focus.
+      e.preventDefault();
+      const m = this.mergeAt(h.row, h.col);
+      const r = m ? { ...m } : { r0: h.row, c0: h.col, r1: h.row, c1: h.col };
+      this.pointDrag = { row: h.row, col: h.col };
+      this.pointMode.onPick(r, false);
+      return;
+    }
     this.scroller.focus({ preventScroll: true });
+    if (h.area === "fill") {
+      const s = this.selection;
+      this.fillDrag = { src: s, dst: { ...s } };
+      e.preventDefault();
+      return;
+    }
     if (h.area === "corner") {
       this.selectAll();
       return;
@@ -806,6 +845,29 @@ export class Grid {
       else this.setRowHeight(z.index, z.startSize + (e.clientY - z.start));
       return;
     }
+    if (this.fillDrag || this.pointDrag) {
+      const { x, y } = this.lastMouse;
+      const hx = Math.max(this.rowHeaderW + 1, Math.min(x, this.viewW - 1));
+      const hy = Math.max(HH + 1, Math.min(y, this.viewH - 1));
+      const row = this.rowAtCanvasY(hy);
+      const col = Math.min(this.colCount - 1, this.colAtCanvasX(hx));
+      if (this.pointDrag && this.pointMode) {
+        const p = this.pointDrag;
+        this.pointMode.onPick({ r0: Math.min(p.row, row), c0: Math.min(p.col, col), r1: Math.max(p.row, row), c1: Math.max(p.col, col) }, true);
+      } else if (this.fillDrag) {
+        const s = this.fillDrag.src;
+        // Extend along the axis where the pointer is farthest outside the selection.
+        const down = row > s.r1 ? row - s.r1 : row < s.r0 ? s.r0 - row : 0;
+        const across = col > s.c1 ? col - s.c1 : col < s.c0 ? s.c0 - col : 0;
+        let dst = { ...s };
+        if (down >= across && down > 0) dst = row > s.r1 ? { ...s, r1: row } : { ...s, r0: row };
+        else if (across > 0) dst = col > s.c1 ? { ...s, c1: col } : { ...s, c0: col };
+        this.fillDrag.dst = dst;
+        this.render();
+      }
+      if ((y < HH + 2 || y > this.viewH - 4 || x > this.viewW - 4) && !this.autoScroll) this.autoScrollLoop();
+      return;
+    }
     if (!this.drag) {
       // The pointer may be over the scroll spacer (a child of the scroller), so test by position.
       const { x, y } = this.lastMouse;
@@ -818,7 +880,9 @@ export class Grid {
               ? "row-resize"
               : (h.area === "col" || h.area === "cell") && h.filterBtn
                 ? "pointer"
-                : "cell";
+                : h.area === "fill"
+                  ? "crosshair"
+                  : "cell";
       }
       return;
     }
@@ -851,7 +915,7 @@ export class Grid {
 
   private autoScrollLoop() {
     const step = () => {
-      if (!this.drag) {
+      if (!this.drag && !this.fillDrag && !this.pointDrag) {
         this.autoScroll = 0;
         return;
       }
@@ -875,13 +939,21 @@ export class Grid {
         this.autoScroll = 0;
         return;
       }
-      this.dragTo();
+      if (this.drag) this.dragTo();
+      else window.dispatchEvent(new MouseEvent("mousemove", { clientX: this.lastMouse.x + this.scroller.getBoundingClientRect().left, clientY: this.lastMouse.y + this.scroller.getBoundingClientRect().top }));
       this.autoScroll = requestAnimationFrame(step);
     };
     this.autoScroll = requestAnimationFrame(step);
   }
 
   private onMouseUp() {
+    if (this.fillDrag) {
+      const { src, dst } = this.fillDrag;
+      this.fillDrag = null;
+      this.render();
+      if (dst.r0 !== src.r0 || dst.r1 !== src.r1 || dst.c0 !== src.c0 || dst.c1 !== src.c1) this.onFill(src, dst);
+    }
+    this.pointDrag = null;
     if (this.resize) {
       const z = this.resize;
       if (z.kind === "col") this.onColResize(z.index, this.colWidth(z.index));
@@ -1023,6 +1095,33 @@ export class Grid {
       ctx.strokeStyle = C.accent;
       ctx.lineWidth = 1.5;
       ctx.strokeRect(xOf(q.c0) + 1, yOf(q.r0) + 1, xOf(q.c1 + 1) - xOf(q.c0) - 2, yOf(q.r1 + 1) - yOf(q.r0) - 2);
+      ctx.restore();
+    }
+    // Fill-handle drag target.
+    if (this.fillDrag) {
+      const q = this.fillDrag.dst;
+      ctx.save();
+      ctx.setLineDash([3, 3]);
+      ctx.strokeStyle = C.muted;
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(xOf(q.c0) + 1, yOf(q.r0) + 1, xOf(q.c1 + 1) - xOf(q.c0) - 2, yOf(q.r1 + 1) - yOf(q.r0) - 2);
+      ctx.restore();
+    }
+    // References of the formula being edited, in their colors.
+    for (const h of this.refHighlights) {
+      const q = h.rect;
+      const x0 = xOf(q.c0);
+      const y0 = yOf(q.r0);
+      const w = xOf(q.c1 + 1) - x0;
+      const hgt = yOf(q.r1 + 1) - y0;
+      ctx.save();
+      ctx.globalAlpha = 0.12;
+      ctx.fillStyle = h.color;
+      ctx.fillRect(x0, y0, w, hgt);
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = h.color;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x0 + 1, y0 + 1, w - 2, hgt - 2);
       ctx.restore();
     }
     // Selection border and active cell.

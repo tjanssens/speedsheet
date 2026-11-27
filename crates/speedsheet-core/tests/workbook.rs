@@ -245,3 +245,41 @@ fn sheet_ops_undo() {
     wb.redo();
     assert_eq!(wb.sheets.len(), 2);
 }
+
+#[test]
+fn fill_handle_series_formulas_and_undo() {
+    let mut wb = wb_with(&[&["1", "=A1*10", "Maandag"], &["2", "", ""], &["", "", ""], &["", "", ""]]);
+    // A1:A2 down to A5: 3, 4, 5.
+    wb.fill(0, (0, 0, 1, 0), (0, 0, 4, 0)).unwrap();
+    assert_eq!((show(&wb, 2, 0), show(&wb, 3, 0), show(&wb, 4, 0)), ("3".into(), "4".into(), "5".into()));
+    // B1 down: formulas shift and calculate.
+    wb.fill(0, (0, 1, 0, 1), (0, 1, 4, 1)).unwrap();
+    assert_eq!(wb.sheets[0].cell(3, 1).input_text(), "=A4*10");
+    assert_eq!(show(&wb, 3, 1), "40");
+    // C1 right: weekday names continue along the row.
+    wb.fill(0, (0, 2, 0, 2), (0, 2, 0, 4)).unwrap();
+    assert_eq!((show(&wb, 0, 3), show(&wb, 0, 4)), ("Dinsdag".into(), "Woensdag".into()));
+    wb.undo();
+    assert_eq!(show(&wb, 0, 3), "");
+    wb.undo();
+    assert_eq!(show(&wb, 3, 1), "");
+    // Double-click fill: B goes down as far as column A has data.
+    wb.set_inputs(0, 0, 1, &[vec!["=A1+1".into()]]).unwrap();
+    let (end, _) = wb.fill_down_auto(0, (0, 1, 0, 1)).unwrap().unwrap();
+    assert_eq!(end, 4);
+    assert_eq!(show(&wb, 4, 1), "6");
+    assert_eq!(show(&wb, 5, 1), "");
+}
+
+#[test]
+fn fill_copies_formats() {
+    let mut wb = wb_with(&[&["x"], &[""]]);
+    wb.styles.push(speedsheet_core::style::CellStyle { bold: true, ..Default::default() });
+    wb.sheets[0].set_style_id(0, 0, 1);
+    wb.fill(0, (0, 0, 0, 0), (0, 0, 2, 0)).unwrap();
+    assert_eq!(wb.sheets[0].style_id(2, 0), 1);
+    assert_eq!(show(&wb, 2, 0), "x");
+    wb.undo();
+    assert_eq!(wb.sheets[0].style_id(2, 0), 0);
+    assert_eq!(wb.sheets[0].style_id(0, 0), 1);
+}
