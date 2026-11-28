@@ -353,6 +353,21 @@ pub fn dispatch(wb: &mut Workbook, cmd: &str, a: Json) -> Result<Json, String> {
             sheet_ok(wb, sheet)?;
             ok(wb.find(&query, sheet, row, col, backwards, all_sheets))
         }
+        "jump" => {
+            // Ctrl+Arrow: where the cursor lands, by the data (see core::nav::jump).
+            #[derive(Deserialize)]
+            struct A {
+                sheet: usize,
+                row: usize,
+                col: usize,
+                dr: i32,
+                dc: i32,
+            }
+            let A { sheet, row, col, dr, dc } = args(a)?;
+            sheet_ok(wb, sheet)?;
+            let (row, col) = speedsheet_core::nav::jump(&wb.sheets[sheet], row, col, dr, dc);
+            ok(json!({ "row": row, "col": col }))
+        }
         "range_stats" => {
             let r: Rect = args(a)?;
             sheet_ok(wb, r.sheet)?;

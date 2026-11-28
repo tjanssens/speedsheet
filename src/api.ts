@@ -1,22 +1,34 @@
 // Thin client for the Rust side. In the desktop app every call goes through one Tauri command;
 // in a plain browser (development) it goes to the dev bridge on 127.0.0.1:1421.
 import { invoke } from "@tauri-apps/api/core";
+import { after } from "./schedule";
 
 export const isTauri = "__TAURI_INTERNALS__" in window;
 const BRIDGE = "http://127.0.0.1:1421";
 /** In the browser every tab is a window of its own; the desktop app knows its windows itself. */
 const VIEW = Math.random().toString(36).slice(2, 10);
 
+/** Engine calls that have not answered yet (the UI tests wait until it is 0). */
+const calls = { inFlight: 0 };
+export const callsInFlight = () => calls.inFlight;
+
 export async function call<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
-  if (isTauri) return invoke<T>("call", { cmd, args });
-  const res = await fetch(`${BRIDGE}/${cmd}?view=${VIEW}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(args),
-  });
-  const body = await res.json();
-  if (!res.ok) throw body;
-  return body as T;
+  // The dev bridge's event poll runs all the time; it is not work the UI waits for.
+  const counted = cmd !== "_events";
+  if (counted) calls.inFlight++;
+  try {
+    if (isTauri) return await invoke<T>("call", { cmd, args });
+    const res = await fetch(`${BRIDGE}/${cmd}?view=${VIEW}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(args),
+    });
+    const body: unknown = await res.json();
+    if (!res.ok) throw body;
+    return body as T;
+  } finally {
+    if (counted) calls.inFlight--;
+  }
 }
 
 /** Listen for messages from the engine meant for this window: `doc-changed` when another window
@@ -27,25 +39,27 @@ export async function onBackendEvent<T>(name: string, handler: (payload: T) => v
     await getCurrentWebviewWindow().listen<T>(name, (e) => handler(e.payload));
     return;
   }
-  (handlers[name] ??= []).push(handler as (p: unknown) => void);
-  if (!polling) {
-    polling = true;
-    pollEvents();
+  (events.handlers[name] ??= []).push(handler as (p: unknown) => void);
+  if (!events.polling) {
+    events.polling = true;
+    await pollEvents();
   }
 }
 
-const handlers: Record<string, ((p: unknown) => void)[]> = {};
-let polling = false;
+const events = { handlers: {} as Record<string, ((p: unknown) => void)[]>, polling: false };
 
 /** The dev bridge has no push channel: fetch this tab's messages a few times per second. */
 async function pollEvents() {
   try {
     const evs = await call<{ event: string; payload: unknown }[]>("_events");
-    for (const ev of evs) for (const h of handlers[ev.event] ?? []) h(ev.payload);
+    for (const ev of evs) for (const h of events.handlers[ev.event] ?? []) h(ev.payload);
   } catch {
     /* bridge restarting */
   }
-  window.setTimeout(pollEvents, evsDelay());
+  // pollEvents handles its own errors, so the catch only satisfies the rule that none get lost.
+  after(evsDelay(), () => {
+    pollEvents().catch(console.error);
+  });
 }
 const evsDelay = () => (document.hidden ? 1000 : 150);
 

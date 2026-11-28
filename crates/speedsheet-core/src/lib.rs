@@ -16,6 +16,7 @@ pub mod formula;
 pub mod input;
 pub mod io;
 pub mod layout;
+pub mod nav;
 pub mod numfmt;
 pub mod ops;
 pub mod shared;

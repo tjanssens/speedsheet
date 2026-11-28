@@ -6,6 +6,8 @@ export default defineConfig({
   testDir: "e2e",
   timeout: 30_000,
   retries: 0,
+  // One browser tab at a time: the dev bridge gives its file to the first tab that asks.
+  workers: 1,
   reporter: process.env.CI ? [["list"], ["html", { open: "never" }]] : "list",
   use: { baseURL: "http://localhost:1420", trace: "off", screenshot: "only-on-failure" },
   webServer: [
