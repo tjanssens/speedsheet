@@ -19,17 +19,27 @@ async function openStyled(page: Page, name: string) {
   await expect(page.locator("#tabs")).toContainText("Leden 2026");
 }
 
-const settle = (page: Page) =>
-  page.waitForFunction(() => {
-    const st = (window as unknown as { __speedsheet: { state(): { callsInFlight: number; pendingDraw: boolean } } }).__speedsheet.state();
-    return st.callsInFlight === 0 && !st.pendingDraw;
-  });
+const settle = async (page: Page) => {
+  try {
+    await page.waitForFunction(
+      () => {
+        const st = (window as unknown as { __speedsheet: { state(): { callsInFlight: number; pendingDraw: boolean } } }).__speedsheet.state();
+        return st.callsInFlight === 0 && !st.pendingDraw;
+      },
+      undefined,
+      { timeout: 10_000 },
+    );
+  } catch (e) {
+    const st = await page.evaluate(() => (window as unknown as { __speedsheet: { state(): unknown } }).__speedsheet.state());
+    throw new Error(`the UI did not settle: ${JSON.stringify(st)}`, { cause: e });
+  }
+};
 
 for (const scheme of ["light", "dark"] as const) {
-  test(`screens in ${scheme} mode`, async ({ page }) => {
+  test(`screens in ${scheme} mode`, async ({ page }, info) => {
     await page.emulateMedia({ colorScheme: scheme });
     await page.setViewportSize({ width: 1280, height: 720 });
-    await openStyled(page, `screens-${scheme}`);
+    await openStyled(page, `screens-${scheme}-${info.repeatEachIndex}`);
     mkdirSync(OUT, { recursive: true });
     const shot = async (what: string) => {
       await settle(page);

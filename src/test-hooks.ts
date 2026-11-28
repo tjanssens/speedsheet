@@ -1,6 +1,6 @@
 // What the browser tests read to check the UI's invariants (e2e/ui-fuzz.spec.ts): the state
 // behind the canvas, which a test cannot see in the DOM. Only in the browser dev build.
-import { call, callsInFlight, isTauri } from "./api";
+import { call, callsDebug, callsInFlight, isTauri } from "./api";
 import { app, curSheet, dom, grid } from "./app";
 
 export interface UiState {
@@ -21,6 +21,8 @@ export interface UiState {
   pendingDraw: boolean;
   /** Engine calls not answered yet: the UI is settled when this is 0 and no draw is pending. */
   callsInFlight: number;
+  /** The open calls by name, and the last failed call (for failure messages). */
+  calls: { pending: Record<string, number>; lastError: string };
   /** id (or tag) of the focused element. */
   focus: string;
 }
@@ -44,6 +46,7 @@ export function uiState(): UiState {
     shownText: cell ? cell.text : null,
     pendingDraw: grid.pendingDraw,
     callsInFlight: callsInFlight(),
+    calls: callsDebug(),
     focus: document.activeElement?.id || document.activeElement?.tagName || "",
   };
 }

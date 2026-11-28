@@ -9,13 +9,18 @@ const BRIDGE = "http://127.0.0.1:1421";
 const VIEW = Math.random().toString(36).slice(2, 10);
 
 /** Engine calls that have not answered yet (the UI tests wait until it is 0). */
-const calls = { inFlight: 0 };
+const calls = { inFlight: 0, pending: new Map<string, number>(), lastError: "" };
 export const callsInFlight = () => calls.inFlight;
+/** For test failure messages: which calls are still open, and the last call that failed. */
+export const callsDebug = () => ({ pending: Object.fromEntries(calls.pending), lastError: calls.lastError });
 
 export async function call<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
   // The dev bridge's event poll runs all the time; it is not work the UI waits for.
   const counted = cmd !== "_events";
-  if (counted) calls.inFlight++;
+  if (counted) {
+    calls.inFlight++;
+    calls.pending.set(cmd, (calls.pending.get(cmd) ?? 0) + 1);
+  }
   try {
     if (isTauri) return await invoke<T>("call", { cmd, args });
     const res = await fetch(`${BRIDGE}/${cmd}?view=${VIEW}`, {
@@ -26,8 +31,16 @@ export async function call<T>(cmd: string, args: Record<string, unknown> = {}): 
     const body: unknown = await res.json();
     if (!res.ok) throw body;
     return body as T;
+  } catch (e) {
+    calls.lastError = `${cmd}: ${e instanceof Error ? e.message : JSON.stringify(e)}`;
+    throw e;
   } finally {
-    if (counted) calls.inFlight--;
+    if (counted) {
+      calls.inFlight--;
+      const n = (calls.pending.get(cmd) ?? 1) - 1;
+      if (n) calls.pending.set(cmd, n);
+      else calls.pending.delete(cmd);
+    }
   }
 }
 

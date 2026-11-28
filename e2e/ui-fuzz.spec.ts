@@ -23,6 +23,7 @@ interface UiState {
   shownText: string | null;
   pendingDraw: boolean;
   callsInFlight: number;
+  calls: { pending: Record<string, number>; lastError: string };
 }
 
 const SEED = Number(process.env.UI_FUZZ_SEED ?? Math.floor(Math.random() * 2 ** 31));
@@ -179,10 +180,16 @@ test("random use of the grid keeps the UI consistent", async ({ page }) => {
     log.push(`${step}: ${a.name}`);
     await a.run();
     // Let the UI settle: no engine call outstanding, nothing left to draw.
-    await page.waitForFunction(() => {
-      const st = (window as unknown as { __speedsheet: { state(): UiState } }).__speedsheet.state();
-      return st.callsInFlight === 0 && !st.pendingDraw;
-    });
+    await check("the UI settles (no engine call open, no draw pending)", () =>
+      page.waitForFunction(
+        () => {
+          const st = (window as unknown as { __speedsheet: { state(): UiState } }).__speedsheet.state();
+          return st.callsInFlight === 0 && !st.pendingDraw;
+        },
+        undefined,
+        { timeout: 20_000 },
+      ),
+    );
     const s = await state(page);
     if (process.env.UI_FUZZ_TRACE) console.log(log[log.length - 1], JSON.stringify(s.active), JSON.stringify(s.selection), await page.locator("#name-box").inputValue(), JSON.stringify(s.editing));
 
