@@ -4092,7 +4092,7 @@ dependencies = [
 
 [[package]]
 name = "speedsheet"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -4112,7 +4112,7 @@ dependencies = [
 
 [[package]]
 name = "speedsheet-core"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "calamine",
  "chrono",
