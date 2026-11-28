@@ -596,14 +596,7 @@ impl Workbook {
     }
 
     fn unique_sheet_name(&self, base: &str) -> String {
-        let mut i = 1;
-        loop {
-            let name = format!("{base}{i}");
-            if self.sheet_index_for(Some(&name), 0).is_none() {
-                return name;
-            }
-            i += 1;
-        }
+        (1usize..).map(|i| format!("{base}{i}")).find(|name| self.sheet_index_for(Some(name), 0).is_none()).unwrap_or_default()
     }
 
     pub fn rename_sheet(&mut self, index: usize, name: String) -> Result<()> {

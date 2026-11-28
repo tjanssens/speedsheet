@@ -330,3 +330,32 @@ fn sort_skips_formulas_that_only_read_their_own_row() {
     let ch = wb.sort(0, 0, false, true).unwrap();
     assert_eq!(ch.recalculated, 2);
 }
+
+#[test]
+fn find_search_and_substitute_with_a_start_or_an_instance() {
+    let mut wb = wb_with(&[&["banana"]]);
+    let f = |s: &str| vec![vec![s.to_string()]];
+    wb.set_inputs(0, 1, 0, &f("=FIND(\"a\",A1,3)")).unwrap();
+    wb.set_inputs(0, 1, 1, &f("=SEARCH(\"A\",A1,5)")).unwrap();
+    wb.set_inputs(0, 1, 2, &f("=SUBSTITUTE(\"a-b-c-d\",\"-\",\"+\",2)")).unwrap();
+    wb.set_inputs(0, 1, 3, &f("=SUBSTITUTE(\"a-b-c\",\"-\",\"+\",1)")).unwrap();
+    assert_eq!(show(&wb, 1, 0), "4");
+    assert_eq!(show(&wb, 1, 1), "6");
+    assert_eq!(show(&wb, 1, 2), "a-b+c-d");
+    assert_eq!(show(&wb, 1, 3), "a+b-c");
+}
+
+#[test]
+fn rand_gives_different_numbers_between_0_and_1() {
+    let mut wb = Workbook::new();
+    let grid: Vec<Vec<String>> = (0..20).map(|_| vec!["=RAND()".to_string()]).collect();
+    wb.set_inputs(0, 0, 0, &grid).unwrap();
+    let xs: Vec<f64> = (0..20)
+        .map(|r| match wb.sheets[0].value(r, 0) {
+            Value::Number(n) => *n,
+            v => panic!("RAND gave {v:?}"),
+        })
+        .collect();
+    assert!(xs.iter().all(|&x| (0.0..1.0).contains(&x)), "{xs:?}");
+    assert!(xs.windows(2).any(|w| w[0] != w[1]), "all the same: {xs:?}");
+}

@@ -71,7 +71,11 @@ fn split_num(s: &str) -> Option<(String, f64, String, usize)> {
     let start = b[..end].iter().rposition(|c| !c.is_ascii_digit()).map(|p| p + 1).unwrap_or(0);
     let digits = s.get(start..end)?;
     let n: f64 = digits.parse().ok()?;
-    let width = if digits.starts_with('0') && digits.len() > 1 { digits.len() } else { 0 };
+    // A leading zero ("08") keeps the width; a lone "0" does not.
+    let width = match digits.as_bytes() {
+        [b'0', _, ..] => digits.len(),
+        _ => 0,
+    };
     Some((s.get(..start)?.to_string(), n, s.get(end..)?.to_string(), width))
 }
 
@@ -215,6 +219,12 @@ mod tests {
         assert_eq!(fill(&["Maandag"], 1..4), ["Dinsdag", "Woensdag", "Donderdag"]);
         assert_eq!(fill(&["sat"], 1..3), ["sun", "mon"]);
         assert_eq!(fill(&["Jan", "Mar"], 2..4), ["May", "Jul"]);
+        assert_eq!(fill(&["Feb", "Apr"], 2..4), ["Jun", "Aug"], "a step counted from a month other than the first");
+        assert_eq!(fill(&["Feb", "Mar", "May"], 3..4), ["Feb"], "uneven steps are copied");
+        assert_eq!(fill(&["A1", "B2"], 2..4), ["A1", "B2"], "different text around the numbers is copied");
+        assert_eq!(fill(&["x1", "x2y"], 2..4), ["x1", "x2y"], "a different suffix too");
+        assert_eq!(fill(&["Item 0"], 1..3), ["Item 1", "Item 2"], "a lone 0 is not zero-padding");
+        assert_eq!(fill(&["Item 9"], 1..2), ["Item 10"]);
         assert_eq!(fill(&["OKT"], 1..4), ["NOV", "DEC", "JAN"]);
         assert_eq!(fill(&["a", "b"], 2..5), ["a", "b", "a"]);
         assert_eq!(fill(&["2026-01-30"], 1..3), ["2026-01-31", "2026-02-01"]);

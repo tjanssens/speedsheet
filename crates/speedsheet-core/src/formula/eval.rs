@@ -1004,7 +1004,10 @@ fn find_ignoring_case(hay: &str, needle: &str) -> Option<usize> {
 
 fn pseudo_random() -> f64 {
     use std::cell::Cell;
-    thread_local!(static STATE: Cell<u64> = Cell::new(crate::clock::random_seed() | 1));
+    use std::hash::{BuildHasher, Hasher};
+    // A different seed in every run, without reading the clock: std seeds its hashers randomly.
+    // Never 0, which xorshift would never leave.
+    thread_local!(static STATE: Cell<u64> = Cell::new(std::collections::hash_map::RandomState::new().build_hasher().finish().max(1)));
     STATE.with(|s| {
         let mut x = s.get();
         x ^= x << 13;

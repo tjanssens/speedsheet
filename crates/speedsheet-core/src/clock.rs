@@ -9,9 +9,3 @@
 pub(crate) fn local_now() -> chrono::DateTime<chrono::Local> {
     chrono::Local::now()
 }
-
-/// A seed for RAND(): changes from run to run.
-pub(crate) fn random_seed() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64)
-}

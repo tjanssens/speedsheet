@@ -61,3 +61,25 @@ fn a_filtered_sheet_jumps_over_hidden_rows_and_ends_at_its_last_visible_row() {
     assert_eq!(jump(s, 0, 0, 1, 0), (2, 0), "over the empty row to c");
     assert_eq!(jump(s, 2, 0, 1, 0), (2, 0), "the last visible row is the edge");
 }
+
+#[test]
+fn the_cell_before_the_edge_and_positions_past_it() {
+    let empty = sheet(&["."]);
+    assert_eq!(jump(&empty, MAX_ROWS - 2, 0, 1, 0), (MAX_ROWS - 1, 0), "one step from the last row");
+    assert_eq!(jump(&empty, 0, MAX_COLS - 2, 0, 1), (0, MAX_COLS - 1), "one step from the last column");
+    assert_eq!(jump(&empty, 0, MAX_COLS + 1, 0, 1), (0, MAX_COLS - 1), "a column past the edge counts as the last one");
+    assert_eq!(jump(&empty, 0, 0, 0, 0), (0, 0), "no direction: no move");
+}
+
+#[test]
+fn a_filtered_sheet_stops_at_a_filled_row_just_before_its_last_row() {
+    // The view is a, (empty), c, (empty): from a, Ctrl+Down stops at c, not at the last row.
+    let rows = ["a", "", "c", "", "x"].iter().map(|t| vec![parse_input(t)]).collect();
+    let mut wb = Workbook::from_sheets(vec![Sheet::from_rows("S", rows)], speedsheet_core::FileFormat::Xlsx);
+    let f = Filter { header: false, conds: vec![FilterCond { col: 0, op: FilterOp::NotIn { values: vec!["x".into()] } }] };
+    wb.set_filter(0, Some(f)).unwrap();
+    let s = &wb.sheets[0];
+    assert_eq!(s.view_len(), 4);
+    assert_eq!(jump(s, 0, 0, 1, 0), (2, 0));
+    assert_eq!(jump(s, 2, 0, 1, 0), (3, 0));
+}
