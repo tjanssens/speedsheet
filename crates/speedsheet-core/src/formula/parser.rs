@@ -185,7 +185,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
             let rest = &src[start..];
             let mut found = None;
             for e in ["#DIV/0!", "#N/A", "#NAME?", "#NULL!", "#NUM!", "#REF!", "#VALUE!", "#CYCLE!"] {
-                if rest.len() >= e.len() && rest[..e.len()].eq_ignore_ascii_case(e) {
+                if rest.get(..e.len()).is_some_and(|p| p.eq_ignore_ascii_case(e)) {
                     found = Some(e);
                     break;
                 }
@@ -711,6 +711,9 @@ mod tests {
         assert!(parse("IF(A1>=10;\"big\";\"small\")").is_ok());
         assert!(parse("_xlfn.XLOOKUP(1,A:A,B:B)").is_ok());
         assert!(parse("SUM(A1").is_err());
+        // Found by tests/fuzz.rs: a multi-byte character after '#' used to panic.
+        assert!(parse("#\u{11918}").is_err());
+        assert!(parse("#NAMé").is_err());
     }
 
     #[test]

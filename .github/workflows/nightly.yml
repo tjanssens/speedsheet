@@ -1,0 +1,82 @@
+name: Nightly
+
+# Slow, deep checks that would make every PR wait: many more random cases for the property and
+# fuzz tests, new vulnerability advisories against the unchanged lockfile, and (weekly) mutation
+# testing of the whole core. A failure here means: reproduce it with a test, then fix (CLAUDE.md).
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+    inputs:
+      mutants:
+        description: "Also run the full mutation test"
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  deep-tests:
+    name: Property and fuzz tests, 50x cases (${{ matrix.tz }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tz: [Pacific/Kiritimati, Pacific/Pago_Pago]
+    env:
+      TZ: ${{ matrix.tz }}
+      PROPTEST_CASES: 12800
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Release mode: same code, ~10x more cases per minute. Overflow checks stay on.
+      - run: cargo test --release -p speedsheet-core --config 'profile.release.overflow-checks=true' --test invariants --test fuzz --test stress
+      - name: Save the failing case
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proptest-regressions-${{ strategy.job-index }}
+          path: crates/speedsheet-core/tests/*.proptest-regressions
+
+  advisories:
+    name: New security advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm audit --omit=dev --audit-level=high
+
+  mutants:
+    name: Mutation test, whole core (shard ${{ matrix.shard }}/4)
+    if: github.event_name == 'schedule' || inputs.mutants
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+      - name: Mutate (report only)
+        run: |
+          # Weekly on Sunday, or on request.
+          if [ "${{ github.event_name }}" = schedule ] && [ "$(date -u +%u)" != 7 ]; then echo "Not Sunday."; exit 0; fi
+          cargo mutants -p speedsheet-core --shard ${{ matrix.shard }}/4 --timeout-multiplier 3 -j 2 || true
+          { echo "### Missed mutants (shard ${{ matrix.shard }})"; echo '```'; cat mutants.out/missed.txt 2>/dev/null || echo none; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutants-${{ matrix.shard }}
+          path: mutants.out/*.txt
+          if-no-files-found: ignore

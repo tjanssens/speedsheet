@@ -283,3 +283,50 @@ fn fill_copies_formats() {
     assert_eq!(wb.sheets[0].style_id(2, 0), 0);
     assert_eq!(wb.sheets[0].style_id(0, 0), 1);
 }
+
+#[test]
+fn adding_a_sheet_resolves_formulas_that_named_it() {
+    // Found by tests/invariants.rs: the formula kept showing #REF! after Sheet2 came back.
+    let mut wb = wb_with(&[&["=Sheet2!A1+1"]]);
+    assert_eq!(show(&wb, 0, 0), "#REF!");
+    let i = wb.add_sheet(None);
+    assert_eq!(wb.sheets[i].name, "Sheet2");
+    assert_eq!(show(&wb, 0, 0), "1");
+    wb.undo();
+    assert_eq!(show(&wb, 0, 0), "#REF!");
+}
+
+#[test]
+fn sort_recalculates_absolute_refs_into_the_new_row() {
+    // Found by tests/invariants.rs: =1+$A$2 moved into row 2 by the sort kept its old value.
+    let mut wb = wb_with(&[&["k", "", ""], &["5", "", "b"], &["", "=1+$A$2", "a"]]);
+    assert_eq!(show(&wb, 2, 1), "6");
+    wb.sort(0, 2, true, true).unwrap();
+    assert_eq!(wb.sheets[0].cell(1, 1).input_text(), "=1+$A$2");
+    assert_eq!(show(&wb, 1, 1), "1", "A2 is empty after the sort");
+}
+
+#[test]
+fn undo_sort_after_trailing_rows_were_trimmed() {
+    // Found by tests/invariants.rs: sort, then an edit that trims trailing empty rows, then
+    // undo twice panicked with an out-of-range slice.
+    let mut wb = wb_with(&[&["1", "", "", ""], &["2"], &["", "", "", ""], &["", "", "", "0"]]);
+    wb.sort(0, 3, false, false).unwrap();
+    wb.fill(0, (1, 0, 1, 0), (1, 0, 3, 0)).unwrap();
+    wb.undo();
+    wb.undo();
+    assert_eq!(show(&wb, 0, 0), "1");
+    assert_eq!(show(&wb, 3, 3), "0");
+}
+
+#[test]
+fn sort_skips_formulas_that_only_read_their_own_row() {
+    // Speed: =B2*2 moves with its row and keeps its value, so a sort need not recompute it.
+    // =$B$2 and =SUM(B2:B4) read other rows after the move and must be recomputed.
+    let mut wb = wb_with(&[&["k", "q", "x"], &["b", "2", "=B2*2"], &["a", "5", "=B3*2"], &["c", "1", "=B4*2"]]);
+    let ch = wb.sort(0, 0, true, true).unwrap();
+    assert_eq!(ch.recalculated, 0);
+    wb.set_inputs(0, 1, 3, &[vec!["=$B$2".into()], vec!["=SUM(B2:B4)".into()]]).unwrap();
+    let ch = wb.sort(0, 0, false, true).unwrap();
+    assert_eq!(ch.recalculated, 2);
+}

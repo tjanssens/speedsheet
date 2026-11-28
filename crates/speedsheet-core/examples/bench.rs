@@ -1,8 +1,11 @@
 //! Time the core operations on a file: `cargo run --release -p speedsheet-core --example bench -- testdata/large-500k.xlsx`
+//!
+//! CI compares the output with `bench/budget.txt` and with the base branch (`scripts/bench_check.py`).
+//! Keep the `name  <number> ms` line format: the checker parses it.
 
 use std::time::Instant;
 
-use speedsheet_core::{io, Filter, FilterCond, FilterOp};
+use speedsheet_core::{io, Filter, FilterCond, FilterOp, Workbook};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = std::env::args().nth(1).unwrap_or_else(|| "testdata/large-500k.xlsx".into());
@@ -39,5 +42,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let t = Instant::now();
     io::save(&mut wb, &out, 0)?;
     println!("save xlsx {:>8.0} ms", t.elapsed().as_secs_f64() * 1e3);
+    chain()?;
+    Ok(())
+}
+
+/// A 50,000-cell dependency chain (A2=A1+1, ...): entering it, then changing its first cell,
+/// which recalculates every link.
+fn chain() -> Result<(), Box<dyn std::error::Error>> {
+    let n = 50_000;
+    let mut grid = vec![vec!["1".to_string()]];
+    grid.extend((1..n).map(|r| vec![format!("=A{r}+1")]));
+    let mut wb = Workbook::new();
+    let t = Instant::now();
+    wb.set_inputs(0, 0, 0, &grid)?;
+    println!("chain in  {:>8.0} ms  ({n} formulas)", t.elapsed().as_secs_f64() * 1e3);
+    let t = Instant::now();
+    let ch = wb.set_inputs(0, 0, 0, &[vec!["2".into()]])?;
+    println!("chain calc{:>8.1} ms  ({} recalculated)", t.elapsed().as_secs_f64() * 1e3, ch.recalculated);
     Ok(())
 }

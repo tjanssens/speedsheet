@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc f5f87451413fde2d681e748dbcd699614881c71e2adfa3cab9c4f62673f93fc4 # shrinks to ops = [Set { sheet: 1, row: 3, col: 3, input: "0" }, Sort { sheet: 1, col: 3, ascending: false, header: false }, FillDown { sheet: 1, row: 1, col: 0, len: 2 }]
+cc c23154cafcd9788f34bd5beef6ad45d76d4ab44918cc6037f14ed4c59b6ee82b # shrinks to ops = [Set { sheet: 1, row: 2, col: 2, input: "=1+$A$2" }, Sort { sheet: 1, col: 2, ascending: false, header: true }]

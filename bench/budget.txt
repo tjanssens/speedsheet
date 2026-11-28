@@ -1,0 +1,12 @@
+# Ceilings in ms for `cargo run --release -p speedsheet-core --example bench -- testdata/large-500k.xlsx`
+# on a GitHub ubuntu-latest runner (fastest of 3 runs). Measured 2026-11-27, budget about 1.5x that.
+# Speed is the product: raise a budget only with a reason in the PR, lower it when you made it faster.
+open        4000
+edit+calc    500
+sort        1600
+filter       250
+find miss    900
+undo sort   1200
+save xlsx   7000
+chain in     400
+chain calc   250

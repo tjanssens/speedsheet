@@ -66,6 +66,13 @@ async function showError(e: unknown, title = "Something went wrong") {
   }
 }
 
+// Safety net: an async action that fails without its own error handling must never fail silently.
+window.addEventListener("unhandledrejection", (ev) => {
+  ev.preventDefault();
+  console.error(ev.reason);
+  void showError(ev.reason);
+});
+
 async function confirmDialog(msg: string, title: string, okLabel = "OK"): Promise<boolean> {
   if (isTauri) {
     const { ask } = await import("@tauri-apps/plugin-dialog");
@@ -228,14 +235,17 @@ async function deleteSheet(i: number) {
 // ---------------------------------------------------------------- selection UI
 
 let cellUiTimer = 0;
-function updateCellUI() {
+/** `resetNameBox`: also overwrite the name box while the user is typing an address in it. */
+function updateCellUI(resetNameBox = false) {
   const a = grid.active;
   const sel = grid.selection;
   const dataRow = grid.dataRowOf(a.row);
   const multi = sel.r0 !== sel.r1 || sel.c0 !== sel.c1;
-  nameBox.value = multi
-    ? `${sel.r1 - sel.r0 + 1}R × ${sel.c1 - sel.c0 + 1}C`
-    : `${colName(a.col)}${dataRow !== null ? dataRow + 1 : ""}`;
+  // An edit that finishes in the background must not overwrite an address being typed.
+  if (resetNameBox || document.activeElement !== nameBox)
+    nameBox.value = multi
+      ? `${sel.r1 - sel.r0 + 1}R × ${sel.c1 - sel.c0 + 1}C`
+      : `${colName(a.col)}${dataRow !== null ? dataRow + 1 : ""}`;
   if (editing) return;
   clearTimeout(cellUiTimer);
   cellUiTimer = window.setTimeout(async () => {
@@ -729,15 +739,16 @@ nameBox.addEventListener("keydown", (e) => {
   if (e.key === "Enter") {
     const p = parseAddress(nameBox.value);
     if (p) {
-      grid.select(p);
       grid.scroller.focus();
-    } else updateCellUI();
+      grid.select(p);
+    } else updateCellUI(true);
   } else if (e.key === "Escape") {
-    updateCellUI();
+    updateCellUI(true);
     grid.scroller.focus();
   }
 });
 nameBox.addEventListener("focus", () => nameBox.select());
+nameBox.addEventListener("blur", () => updateCellUI());
 
 // ---------------------------------------------------------------- clipboard
 

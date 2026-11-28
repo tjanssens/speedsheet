@@ -205,13 +205,17 @@ pub fn format_number(n: f64) -> String {
 /// Convert an Excel serial date into (year, month, day).
 pub fn serial_to_ymd(serial: f64) -> (i64, u32, u32) {
     // Excel serial 25569 is 1970-01-01. Serial 60 is the fictional 1900-02-29; ignore it.
+    // Far outside Excel's range (years 1900-9999) the result is meaningless, but must not overflow.
+    let serial = if serial.is_finite() { serial.clamp(-1e9, 1e9) } else { 0.0 };
     let days = serial.floor() as i64 - 25569;
     civil_from_days(days)
 }
 
 /// Convert (year, month, day) into an Excel serial date.
 pub fn ymd_to_serial(y: i64, m: i64, d: i64) -> f64 {
-    // Normalise month overflow like Excel's DATE(2024, 14, 1).
+    // Normalise month overflow like Excel's DATE(2024, 14, 1). Clamp so absurd input cannot overflow.
+    let (y, m, d) =
+        (y.clamp(-10_000_000, 10_000_000), m.clamp(-1_000_000_000, 1_000_000_000), d.clamp(-1_000_000_000, 1_000_000_000));
     let total_months = y * 12 + (m - 1);
     let y2 = total_months.div_euclid(12);
     let m2 = total_months.rem_euclid(12) + 1;
@@ -276,6 +280,10 @@ mod tests {
         let s = ymd_to_serial(2026, 11, 27);
         assert_eq!(s, 46353.0);
         assert_eq!(serial_to_ymd(s), (2026, 11, 27));
+        // Found by tests/fuzz.rs: huge serials and DATE() arguments used to overflow.
+        let _ = format_date(6.7e72);
+        let _ = format_date(f64::NAN);
+        let _ = ymd_to_serial(i64::MAX, i64::MIN, i64::MAX);
         assert_eq!(format_date(45292.5), "2024-01-01 12:00:00");
     }
 }

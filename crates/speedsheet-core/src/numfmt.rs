@@ -100,7 +100,7 @@ fn tokenize(sec: &str) -> Vec<Tok> {
                 i += 1;
             }
             '[' => {
-                let end = chars[i..].iter().position(|&x| x == ']').map(|p| i + p).unwrap_or(chars.len() - 1);
+                let end = chars[i..].iter().position(|&x| x == ']').map(|p| i + p).unwrap_or(chars.len());
                 let inner: String = chars[i + 1..end].iter().collect();
                 if let Some(cur) = inner.strip_prefix('$') {
                     // [$€-813] -> €
@@ -436,6 +436,14 @@ mod tests {
 
     fn n(v: f64, code: &str) -> String {
         format_value(&Value::Number(v), code)
+    }
+
+    #[test]
+    fn unclosed_bracket_does_not_panic() {
+        // Found by tests/fuzz.rs: =TEXT(1,"[;") used to crash.
+        let _ = n(0.0, "[;");
+        let _ = n(0.0, "[");
+        let _ = n(0.0, "0[");
     }
 
     #[test]

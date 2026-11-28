@@ -4,3 +4,6 @@ node_modules
 src-tauri/gen/schemas
 *.log
 .DS_Store
+/test-results
+/playwright-report
+mutants.out*
