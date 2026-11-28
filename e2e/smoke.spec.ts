@@ -23,7 +23,7 @@ test("open, edit, undo and formula round trip", async ({ page }) => {
   // Edits can be held back to finish later, as on a big file where recalculation takes time.
   let holdNextEdit = false;
   let releaseEdit = () => {};
-  await page.route("**/set_inputs?*", async (route) => {
+  await page.route(/\/set_inputs\?/, async (route) => {
     if (holdNextEdit) {
       holdNextEdit = false;
       await new Promise<void>((done) => (releaseEdit = done));

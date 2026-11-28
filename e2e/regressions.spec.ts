@@ -24,15 +24,23 @@ test("a slow undo does not pull the cursor away from where the user clicked mean
   await expect(nameBox).toHaveValue("B4");
 
   // The undo answers late (a big file); meanwhile the user moves to D7.
+  // `held` resolves once the undo request is actually waiting, so `release` is never called
+  // before the route handler has set it (on a slow CI runner the request can come late).
   let release = () => {};
-  await page.route("**/undo?*", async (route) => {
-    await new Promise<void>((done) => (release = done));
+  let markHeld = () => {};
+  const held = new Promise<void>((done) => (markHeld = done));
+  await page.route(/\/undo\?/, async (route) => {
+    await new Promise<void>((done) => {
+      release = done;
+      markHeld();
+    });
     await route.continue();
   });
   await page.keyboard.press("Control+z");
   await nameBox.fill("D7");
   await nameBox.press("Enter");
   await expect(nameBox).toHaveValue("D7");
+  await held;
   const undone = page.waitForResponse(/\/undo\?/);
   release();
   await undone;

@@ -206,7 +206,7 @@ export function openFilterPopover(o: FilterPopoverOpts) {
   okBtn.onclick = () => {
     const op = opSel.value;
     let cond: FilterCond | null = null;
-    if (op === "empty" || op === "not_empty") cond = { col: colIndex, op } as FilterCond;
+    if (op === "empty" || op === "not_empty") cond = { col: colIndex, op };
     else if (op) cond = { col: colIndex, op, value: opVal.value } as FilterCond;
     else {
       const checked = values.filter(([v]) => isChecked(v)).map(([v]) => v);
