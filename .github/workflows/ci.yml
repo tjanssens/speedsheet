@@ -1,5 +1,7 @@
 name: CI
 
+# Every pull request and every push to main. All jobs run in parallel; "CI ok" at the end is the
+# single check branch protection requires. Target: a green run in about 5 minutes.
 on:
   push:
     branches: [main]
@@ -9,50 +11,207 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # Property tests: enough cases to catch regressions on every PR; nightly runs many more.
+  PROPTEST_CASES: 256
+  TAURI_LINUX_DEPS: libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+
 jobs:
   core:
-    name: Rust core (${{ matrix.os }})
+    name: Core tests (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          # Time zones far from UTC (+14 and -11): at any moment one of them is on another date
+          # than UTC, so code that assumes UTC fails here.
+          - { name: linux UTC+14, os: ubuntu-latest, tz: Pacific/Kiritimati }
+          - { name: macOS UTC-11, os: macos-latest, tz: Pacific/Pago_Pago }
+          - { name: windows, os: windows-latest, tz: "" }
+    env:
+      TZ: ${{ matrix.tz }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          lfs: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p speedsheet-core
+      - name: Known bugs (ignored tests; informational)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set +e
+          cargo test -p speedsheet-core -- --ignored 2>&1 | tee ignored.txt
+          {
+            echo "### Known bugs (tests marked #[ignore])"
+            echo "A test that passes here means the bug is fixed: remove its #[ignore]."
+            echo
+            grep -E '^test .* \.\.\. (ok|FAILED)$' ignored.txt | sed -E 's/^test (.*) \.\.\. ok$/- :white_check_mark: `\1` passes now/; s/^test (.*) \.\.\. FAILED$/- :x: `\1` still fails/'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
 
-  app:
-    name: App (lint, types, build check)
+  lint:
+    name: Lint, types, build
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - run: cargo fmt --all --check
+      - name: Versions agree (package.json, Cargo.toml, tauri.conf.json)
+        run: scripts/check-versions.sh
       - uses: Swatinem/rust-cache@v2
-      - name: Install Linux dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+      - uses: awalsh128/cache-apt-pkgs-action@v1.5.3
+        with:
+          packages: ${{ env.TAURI_LINUX_DEPS }}
+          version: 1
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: npm run lint
       - run: npm run build
-      - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
-  bench:
-    name: Performance (500k rows)
-    runs-on: ubuntu-latest
+  e2e:
+    name: UI smoke test (browser)
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Open, edit, sort, filter, find and save the 500k-row test file
-        run: cargo run --release -p speedsheet-core --example bench -- testdata/large-500k.xlsx | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: awalsh128/cache-apt-pkgs-action@v1.5.3
+        with:
+          packages: ${{ env.TAURI_LINUX_DEPS }}
+          version: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Build the dev bridge
+        run: cargo build -p speedsheet --example dev_bridge
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ hashFiles('package-lock.json') }}
+      - run: npx playwright install --with-deps chromium
+      - run: npx playwright test
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ui-smoke
+          path: |
+            test-results/
+            playwright-report/
+          retention-days: 7
+
+  coverage:
+    name: Coverage (core)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      # The floor only goes up: raise it when coverage rises (see CLAUDE.md).
+      - name: Line coverage must stay at or above the floor
+        run: |
+          cargo llvm-cov -p speedsheet-core --summary-only --fail-under-lines "$(cat .github/coverage-floor)" | tee cov.txt
+          { echo '### Coverage (speedsheet-core)'; echo '```'; grep -E '^(Filename|TOTAL|[a-z/_]+\.rs)' cov.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+  mutants:
+    name: Mutation test (changed core code)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+      # Changes every changed line of core code in small ways (+ to -, > to >=, return a default...)
+      # and runs the tests. A change no test notices ("missed") is code the tests do not really check.
+      - name: Mutate changed lines
+        run: |
+          git diff "origin/${{ github.base_ref }}...HEAD" -- crates/speedsheet-core/src > diff.patch
+          if [ ! -s diff.patch ]; then echo "No core source changes." >> "$GITHUB_STEP_SUMMARY"; exit 0; fi
+          set +e
+          cargo mutants -p speedsheet-core --in-diff diff.patch --no-shuffle --timeout-multiplier 3 -j 2
+          status=$?
+          {
+            echo "### Mutation test of changed core code"
+            if [ -s mutants.out/missed.txt ]; then
+              echo "Mutations no test noticed (add or sharpen a test):"; echo '```'; cat mutants.out/missed.txt; echo '```'
+            else
+              echo "Every mutation of the changed code was caught by a test."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          # 2 = missed mutants, 3 = timeouts: real findings. Anything else (e.g. build failure) too.
+          exit $status
+
+  bench:
+    name: Performance (500k rows, budgets and vs main)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build this branch and the base branch
+        run: |
+          cargo build --release -p speedsheet-core --example bench
+          cp target/release/examples/bench ./bench-head
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            git worktree add ../base "origin/${{ github.base_ref }}"
+            (cd ../base && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo build --release -p speedsheet-core --example bench)
+            cp target/release/examples/bench ./bench-base
+          fi
+      - name: Run 3 times each, interleaved
+        run: |
+          for i in 1 2 3; do
+            ./bench-head testdata/large-500k.xlsx | tee -a head.txt
+            if [ -x ./bench-base ]; then ./bench-base testdata/large-500k.xlsx >> base.txt; fi
+          done
+      - name: Check budgets and regressions
+        run: |
+          base=""; [ -f base.txt ] && base="--base base.txt"
+          python3 scripts/bench_check.py --budget bench/budget.txt --head head.txt $base | tee -a "$GITHUB_STEP_SUMMARY"
+
+  audit:
+    name: Dependencies (vulnerabilities, licenses)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # Only what ships in the app; dev tools run on the developer's machine only.
+      - run: npm audit --omit=dev --audit-level=high
+
+  ci-ok:
+    name: CI ok
+    if: always()
+    needs: [core, lint, e2e, coverage, mutants, bench, audit]
+    runs-on: ubuntu-latest
+    steps:
+      - name: All required jobs passed
+        run: |
+          echo '${{ toJSON(needs) }}' | python3 -c '
+          import json, sys
+          bad = {k: v["result"] for k, v in json.load(sys.stdin).items() if v["result"] not in ("success", "skipped")}
+          print("failed:", bad) if bad else print("all green")
+          sys.exit(1 if bad else 0)'

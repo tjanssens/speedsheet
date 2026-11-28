@@ -66,6 +66,13 @@ async function showError(e: unknown, title = "Something went wrong") {
   }
 }
 
+// Safety net: an async action that fails without its own error handling must never fail silently.
+window.addEventListener("unhandledrejection", (ev) => {
+  ev.preventDefault();
+  console.error(ev.reason);
+  void showError(ev.reason);
+});
+
 async function confirmDialog(msg: string, title: string, okLabel = "OK"): Promise<boolean> {
   if (isTauri) {
     const { ask } = await import("@tauri-apps/plugin-dialog");

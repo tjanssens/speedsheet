@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use eval::{Context, Evaluator, Rng};
-use parser::{collect_names, collect_refs, has_volatile, parse, Expr, RefTok};
+use parser::{collect_names, collect_refs, has_volatile, parse, Expr, RefPart, RefTok};
 
 use crate::sheet::Cell;
 use crate::value::{CellError, Value};
@@ -103,10 +103,18 @@ impl DepIndex {
                         idx.volatile.push(fi);
                     }
                     refs.extend(via_names.iter());
+                    // Only relative row references move with the row: `=$B$2` in row 2 still reads
+                    // row 2 after the sort moved it elsewhere, and so do names (found by tests/invariants.rs).
+                    let relative_row = |p: &RefPart| matches!(p, RefPart::Cell { abs_row: false, .. });
                     idx.row_local[fi as usize] = !volatile
+                        && via_names.is_empty()
                         && refs.iter().all(|rt| {
                             let (r0, _, r1, _) = rt.bounds();
-                            r0 == r as u32 && r1 == r as u32 && wb.sheet_index_for(rt.sheet.as_deref(), si) == Some(si)
+                            r0 == r as u32
+                                && r1 == r as u32
+                                && relative_row(&rt.a)
+                                && rt.b.as_ref().is_none_or(relative_row)
+                                && wb.sheet_index_for(rt.sheet.as_deref(), si) == Some(si)
                         });
                     for rt in refs {
                         let Some(s) = wb.sheet_index_for(rt.sheet.as_deref(), si) else { continue };

@@ -1,0 +1,9 @@
+# cargo-mutants settings (CI mutates the changed core lines of every PR).
+#
+# A "missed" mutant means the tests did not notice a deliberate bug: add or sharpen a test.
+# Rarely a mutant is equivalent (the change cannot be observed, e.g. `<` vs `<=` where both
+# give the same result). Then prefer rewriting the code so the question does not arise; only
+# if that is worse, exclude it here with a regex on the mutant's name and a reason.
+timeout_multiplier = 3.0
+exclude_re = [
+]

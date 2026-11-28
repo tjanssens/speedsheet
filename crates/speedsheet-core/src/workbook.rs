@@ -306,6 +306,12 @@ impl Workbook {
         formula::recalc(self, dirty)
     }
 
+    /// Recompute every formula from scratch. Tests use it as an oracle: after any operation the
+    /// incrementally maintained values must equal what a full recalculation gives.
+    pub fn recalc_everything(&mut self) -> usize {
+        self.recalc_all()
+    }
+
     fn recalc_all(&mut self) -> usize {
         self.deps = None;
         self.deps();
@@ -501,6 +507,9 @@ impl Workbook {
     fn apply_perm(&mut self, sheet: usize, start: usize, perm: &[u32]) -> Vec<(u32, u32, u32, Arc<str>)> {
         let mut broken = Vec::new();
         let sh = &mut self.sheets[sheet];
+        // Trailing empty rows are trimmed by later edits; undoing a sort after that must still
+        // find its rows (found by tests/invariants.rs: sort, fill, undo, undo panicked).
+        sh.rows.resize_with(sh.rows.len().max(start + perm.len()), Vec::new);
         let mut old: Vec<Option<Vec<Cell>>> =
             sh.rows[start..start + perm.len()].iter_mut().map(|r| Some(std::mem::take(r))).collect();
         for (i, &p) in perm.iter().enumerate() {
@@ -519,6 +528,9 @@ impl Workbook {
                 }
             }
             sh.rows[start + i] = row;
+        }
+        while sh.rows.last().is_some_and(|r| r.is_empty()) {
+            sh.rows.pop();
         }
         // Cell formatting moves with the rows, like in Excel.
         if sh.styles.len() > start {
@@ -586,6 +598,8 @@ impl Workbook {
         let index = self.sheets.len();
         self.sheets.push(Sheet::new(name));
         self.deps = None;
+        // Formulas that referred to a sheet of this name (deleted or never there) now resolve.
+        self.recalc_all();
         self.push_undo(Action::AddSheet { index, sheet: None });
         index
     }
