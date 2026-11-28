@@ -28,14 +28,14 @@ jobs:
       TZ: ${{ matrix.tz }}
       PROPTEST_CASES: 12800
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Release mode: same code, ~10x more cases per minute. Overflow checks stay on.
       - run: cargo test --release -p speedsheet-core --config 'profile.release.overflow-checks=true' --test invariants --test fuzz --test stress
       - name: Save the failing case
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: proptest-regressions-${{ strategy.job-index }}
           path: crates/speedsheet-core/tests/*.proptest-regressions
@@ -44,14 +44,14 @@ jobs:
     name: UI fuzz, 3 x 3000 steps
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: awalsh128/cache-apt-pkgs-action@v1.5.3
+      - uses: awalsh128/cache-apt-pkgs-action@v2.0.0
         with:
           packages: libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
           version: 1
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -62,7 +62,7 @@ jobs:
       - run: for i in 1 2 3; do npx playwright test ui-fuzz --trace off || exit 1; done
         env:
           UI_FUZZ_STEPS: 3000
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: ui-fuzz-failure
@@ -72,11 +72,11 @@ jobs:
     name: New security advisories
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - run: npm audit --omit=dev --audit-level=high
@@ -90,7 +90,7 @@ jobs:
       matrix:
         shard: [0, 1, 2, 3]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
@@ -102,7 +102,7 @@ jobs:
           if [ "${{ github.event_name }}" = schedule ] && [ "$(date -u +%u)" != 7 ]; then echo "Not Sunday."; exit 0; fi
           cargo mutants -p speedsheet-core --shard ${{ matrix.shard }}/4 --timeout-multiplier 3 -j 2 || true
           { echo "### Missed mutants (shard ${{ matrix.shard }})"; echo '```'; cat mutants.out/missed.txt 2>/dev/null || echo none; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: mutants-${{ matrix.shard }}
