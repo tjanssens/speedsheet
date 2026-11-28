@@ -13,6 +13,17 @@ test("open, edit, undo and formula round trip", async ({ page }) => {
     void d.dismiss();
   });
 
+  // Edits can be held back to finish later, as on a big file where recalculation takes time.
+  let holdNextEdit = false;
+  let releaseEdit = () => {};
+  await page.route("**/set_inputs?*", async (route) => {
+    if (holdNextEdit) {
+      holdNextEdit = false;
+      await new Promise<void>((done) => (releaseEdit = done));
+    }
+    await route.continue();
+  });
+
   await page.goto("/");
   await expect(page.locator("#tabs")).toContainText("Leden 2026");
   const nameBox = page.locator("#name-box");
@@ -41,13 +52,20 @@ test("open, edit, undo and formula round trip", async ({ page }) => {
   await page.keyboard.press("Control+z");
   await expect(contents).toHaveValue(original);
 
-  // A formula in an empty cell keeps its text.
+  // A formula in an empty cell keeps its text. The edit finishes while the next address is
+  // being typed in the name box: it must not overwrite that address.
   await goTo("K20");
   await page.locator("#scroller").focus();
+  holdNextEdit = true;
   await page.keyboard.type("=1+2");
   await page.keyboard.press("Enter");
   await expect(nameBox).toHaveValue("K21");
-  await goTo("K20");
+  await nameBox.fill("K20");
+  const editDone = page.waitForResponse(/set_inputs/);
+  releaseEdit();
+  await editDone;
+  await nameBox.press("Enter");
+  await expect(nameBox).toHaveValue("K20");
   await expect(contents).toHaveValue("=1+2");
 
   await page.screenshot({ path: "test-results/smoke.png" });
