@@ -11,9 +11,9 @@ pub fn parse_input(s: &str) -> Cell {
     if let Some(rest) = s.strip_prefix('\'') {
         return Cell::from_value(Value::text(rest));
     }
-    if s.len() > 1 && s.starts_with('=') {
+    if let Some(src) = s.strip_prefix('=').filter(|f| !f.is_empty()) {
         // Value is filled in by recalculation.
-        return Cell::formula(s[1..].trim(), Value::Empty);
+        return Cell::formula(src.trim(), Value::Empty);
     }
     Cell::from_value(parse_value(s))
 }

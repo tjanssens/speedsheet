@@ -228,11 +228,9 @@ impl Workbook {
         self.sheets.get(i).ok_or(Error::NoSuchSheet(i))
     }
 
-    fn deps(&mut self) -> &DepIndex {
-        if self.deps.is_none() {
-            self.deps = Some(DepIndex::build(self));
-        }
-        self.deps.as_ref().unwrap()
+    /// The dependency index, built if needed. Put it back with `self.deps = Some(idx)`.
+    fn take_deps(&mut self) -> DepIndex {
+        self.deps.take().unwrap_or_else(|| DepIndex::build(self))
     }
 
     fn push_undo(&mut self, a: Action) {
@@ -280,30 +278,22 @@ impl Workbook {
         if changed.is_empty() {
             return 0;
         }
-        let dirty = {
-            self.deps();
-            let idx = self.deps.as_ref().unwrap();
-            if idx.all().is_empty() {
-                return 0;
-            }
-            formula::dirty_set(idx, changed, self)
-        };
-        formula::recalc(self, dirty)
+        let idx = self.take_deps();
+        let dirty = (!idx.all().is_empty()).then(|| formula::dirty_set(&idx, changed, self));
+        self.deps = Some(idx);
+        dirty.map_or(0, |d| formula::recalc(self, d))
     }
 
     /// After rows were reordered: recompute everything except row-local formulas,
     /// plus whatever depends on what was recomputed.
     fn recalc_after_reorder(&mut self, extra: &[Pos]) -> usize {
         self.deps = None;
-        self.deps();
-        let idx = self.deps.as_ref().unwrap();
+        let idx = self.take_deps();
         let mut seeds = idx.non_row_local();
         seeds.extend_from_slice(extra);
-        if seeds.is_empty() {
-            return 0;
-        }
-        let dirty = formula::dirty_set(idx, &seeds, self);
-        formula::recalc(self, dirty)
+        let dirty = (!seeds.is_empty()).then(|| formula::dirty_set(&idx, &seeds, self));
+        self.deps = Some(idx);
+        dirty.map_or(0, |d| formula::recalc(self, d))
     }
 
     /// Recompute every formula from scratch. Tests use it as an oracle: after any operation the
@@ -314,8 +304,9 @@ impl Workbook {
 
     fn recalc_all(&mut self) -> usize {
         self.deps = None;
-        self.deps();
-        let all: HashSet<Pos> = self.deps.as_ref().unwrap().all().iter().copied().collect();
+        let idx = self.take_deps();
+        let all: HashSet<Pos> = idx.all().iter().copied().collect();
+        self.deps = Some(idx);
         formula::recalc(self, all)
     }
 
@@ -605,7 +596,14 @@ impl Workbook {
     }
 
     fn unique_sheet_name(&self, base: &str) -> String {
-        (1..).map(|i| format!("{base}{i}")).find(|n| self.sheet_index_for(Some(n), 0).is_none()).unwrap()
+        let mut i = 1;
+        loop {
+            let name = format!("{base}{i}");
+            if self.sheet_index_for(Some(&name), 0).is_none() {
+                return name;
+            }
+            i += 1;
+        }
     }
 
     pub fn rename_sheet(&mut self, index: usize, name: String) -> Result<()> {

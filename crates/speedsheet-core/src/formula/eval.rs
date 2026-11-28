@@ -636,10 +636,13 @@ impl<'c, C: Context> Evaluator<'c, C> {
                         return Err(CellError::Value);
                     }
                     let rest: String = hay_chars[skip..].iter().collect();
-                    let found =
-                        if name == "FIND" { rest.find(&needle) } else { rest.to_lowercase().find(&needle.to_lowercase()) };
+                    let found = if name == "FIND" {
+                        rest.split_once(needle.as_str()).map(|(before, _)| before.chars().count())
+                    } else {
+                        find_ignoring_case(&rest, &needle)
+                    };
                     match found {
-                        Some(byte) => Value::Number((rest[..byte].chars().count() + skip + 1) as f64),
+                        Some(chars) => Value::Number((chars + skip + 1) as f64),
                         None => return Err(CellError::Value),
                     }
                 }
@@ -656,11 +659,11 @@ impl<'c, C: Context> Evaluator<'c, C> {
                         let mut out = String::new();
                         let mut rest = s.as_str();
                         let mut i = 0;
-                        while let Some(p) = rest.find(&old) {
+                        while let Some((before, after)) = rest.split_once(old.as_str()) {
                             i += 1;
-                            out.push_str(&rest[..p]);
+                            out.push_str(before);
                             out.push_str(if i == nth { &new } else { &old });
-                            rest = &rest[p + old.len()..];
+                            rest = after;
                         }
                         out.push_str(rest);
                         Value::text(out)
@@ -982,12 +985,26 @@ fn one(args: &[Expr]) -> R<&Expr> {
     }
 }
 
+/// SEARCH: the character position of `needle` in `hay`, ignoring case. Lowercasing can change a
+/// character's length ("İ" becomes two characters), so positions are mapped back to `hay`.
+fn find_ignoring_case(hay: &str, needle: &str) -> Option<usize> {
+    let needle = needle.to_lowercase();
+    let mut low = String::with_capacity(hay.len());
+    // (byte offset in `low`, character index in `hay`) where each lowercased character starts.
+    let mut starts = Vec::with_capacity(hay.len());
+    for (i, ch) in hay.chars().enumerate() {
+        starts.push((low.len(), i));
+        low.extend(ch.to_lowercase());
+    }
+    let byte = low.find(&needle)?;
+    // A match that starts inside a lowercased character counts from that character.
+    let at = starts.partition_point(|&(b, _)| b <= byte);
+    Some(starts.get(at.wrapping_sub(1)).map_or(0, |&(_, i)| i))
+}
+
 fn pseudo_random() -> f64 {
     use std::cell::Cell;
-    use std::time::{SystemTime, UNIX_EPOCH};
-    thread_local!(static STATE: Cell<u64> = Cell::new(
-        SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1) | 1
-    ));
+    thread_local!(static STATE: Cell<u64> = Cell::new(crate::clock::random_seed() | 1));
     STATE.with(|s| {
         let mut x = s.get();
         x ^= x << 13;
@@ -1104,7 +1121,7 @@ impl Criteria {
         } else if let Some(r) = t.strip_prefix('<') {
             (Op::Lt, r)
         } else {
-            (Op::Eq, &t[..])
+            (Op::Eq, t.as_ref())
         };
         let val = if rest.is_empty() {
             Value::Empty

@@ -60,10 +60,9 @@ impl Cell {
             Cell::Value(Value::Number(n)) => {
                 // Full precision for editing.
                 let s = format!("{}", n);
-                if s.ends_with(".0") {
-                    s[..s.len() - 2].to_string()
-                } else {
-                    s
+                match s.strip_suffix(".0") {
+                    Some(whole) => whole.to_string(),
+                    None => s,
                 }
             }
             Cell::Value(Value::Text(t)) => {
@@ -345,8 +344,7 @@ pub fn col_name(mut col: usize) -> String {
         }
         col = col / 26 - 1;
     }
-    s.reverse();
-    String::from_utf8(s).unwrap()
+    s.iter().rev().map(|&b| b as char).collect()
 }
 
 /// Letters to column index: A -> 0. Returns None for invalid or out-of-range input.

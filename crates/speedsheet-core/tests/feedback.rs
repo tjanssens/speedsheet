@@ -228,7 +228,8 @@ fn today_uses_the_local_date() {
     // Summer time: 2026-07-01 23:30 UTC is 01:30 on July 2nd at UTC+2.
     let unix = 1_782_948_600.0; // 2026-07-01T23:30:00Z
     assert_eq!(formula::serial_from_unix(unix, 7200).floor(), serial("=DATE(2026,7,2)"));
-    // And TODAY() agrees with the system's local calendar date.
+    // And TODAY() agrees with the system's local calendar date (the one place a test reads the clock).
+    #[allow(clippy::disallowed_methods)]
     let today = chrono::Local::now().date_naive();
     let expect = serial(&format!(
         "=DATE({},{},{})",
@@ -383,4 +384,19 @@ fn hidden_sheets_and_rich_text_are_reported() {
     let mut plain = wb_with(&[&["1", "=A1*2"]]);
     speedsheet_core::io::save(&mut plain, &q, 0).unwrap();
     assert!(speedsheet_core::io::open(&q).unwrap().losses.is_empty());
+}
+
+#[test]
+fn search_counts_characters_whose_lowercase_is_longer() {
+    // "İ" lowercases to two characters. SEARCH used the byte offset in the lowercased text to
+    // slice the original: a wrong position, or a crash when the offset ran past the end.
+    let mut wb = wb_with(&[&["İİx", "İx"]]);
+    set(&mut wb, 0, 1, 0, "=SEARCH(\"x\",A1)");
+    set(&mut wb, 0, 1, 1, "=SEARCH(\"X\",B1)");
+    set(&mut wb, 0, 1, 2, "=SEARCH(\"i\",A1)");
+    set(&mut wb, 0, 1, 3, "=FIND(\"x\",A1)");
+    assert_eq!(show(&wb, 0, 1, 0), "3");
+    assert_eq!(show(&wb, 0, 1, 1), "2");
+    assert_eq!(show(&wb, 0, 1, 2), "1");
+    assert_eq!(show(&wb, 0, 1, 3), "3");
 }
