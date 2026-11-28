@@ -200,3 +200,27 @@ fn filter_button_on_any_row() {
     wb.set_autofilter(0, None).unwrap();
     assert!(wb.sheets[0].autofilter.is_none());
 }
+
+#[test]
+fn month_and_day_names_in_date_formats() {
+    use speedsheet_core::numfmt::format_value;
+    let d = Value::Date(46085.0); // Wednesday 4 March 2026
+    assert_eq!(format_value(&d, "mmm"), "Mar");
+    assert_eq!(format_value(&d, "mmmm"), "March");
+    assert_eq!(format_value(&d, "mmmmm"), "M");
+    assert_eq!(format_value(&d, "ddd"), "Wed");
+    assert_eq!(format_value(&d, "dddd"), "Wednesday");
+    let dec = Value::Date(46357.0); // 1 December 2026
+    assert_eq!(format_value(&dec, "mmmm mmm mmmmm"), "December Dec D");
+}
+
+#[test]
+fn a_backslash_inside_quotes_is_text_and_does_not_hide_the_closing_quote() {
+    use speedsheet_core::numfmt::format_value;
+    // The second section is for negative numbers; a misread quote would swallow the `;`.
+    assert_eq!(format_value(&Value::Number(-5.0), "\"a\\\" 0;\"n\" 0"), "n 5");
+    assert_eq!(format_value(&Value::Number(5.0), "\"a\\\" 0;\"n\" 0"), "a\\ 5");
+    // A `;` inside quotes is text, not the start of the next section.
+    assert_eq!(format_value(&Value::Number(5.0), "\"x;y\" 0"), "x;y 5");
+    assert_eq!(format_value(&Value::Number(-5.0), "\"x;y\" 0;\"n\" 0"), "n 5");
+}

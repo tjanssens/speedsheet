@@ -4,12 +4,19 @@
 //! formulas, sorting, filtering, searching and undo/redo. The Tauri app is a thin shell
 //! around this crate, so it can be swapped for a native UI later.
 
+// A panic is a crash in the app. Text from files and from the user reaches most of this code, so
+// slicing a string by a computed index (`&s[a..b]`) and `unwrap()` are not allowed outside tests:
+// use `s.get(a..b)`, `split_once`, `strip_prefix`, `?` or a default instead.
+#![cfg_attr(not(test), deny(clippy::string_slice, clippy::unwrap_used))]
+
+mod clock;
 pub mod fill;
 pub mod filter;
 pub mod formula;
 pub mod input;
 pub mod io;
 pub mod layout;
+pub mod nav;
 pub mod numfmt;
 pub mod ops;
 pub mod shared;

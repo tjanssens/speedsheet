@@ -1,0 +1,8 @@
+# Lint settings shared by the workspace. Each rule here replaces a sentence in CLAUDE.md that
+# people (and agents) had to remember: the compiler now says it, with the fix in the message.
+
+disallowed-methods = [
+  { path = "chrono::Local::now", reason = "read the clock through crate::clock (what the user sees is local time; tests run in UTC+14 and UTC-11)" },
+  { path = "chrono::Utc::now", reason = "the user sees local time: use crate::clock::local_now()" },
+  { path = "std::time::SystemTime::now", reason = "read the clock through crate::clock, so time-dependent code stays in one place" },
+]

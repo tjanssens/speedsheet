@@ -436,7 +436,7 @@ pub fn serial_from_unix(unix_secs: f64, utc_offset_secs: i32) -> f64 {
 
 /// The current local time as an Excel serial number (Excel's NOW() is local time).
 pub(crate) fn now_serial() -> f64 {
-    let now = chrono::Local::now();
+    let now = crate::clock::local_now();
     let unix = now.timestamp() as f64 + now.timestamp_subsec_nanos() as f64 / 1e9;
     serial_from_unix(unix, now.offset().local_minus_utc())
 }

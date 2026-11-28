@@ -38,14 +38,14 @@ fn split_sections(code: &str) -> Vec<&str> {
             b'"' => quoted = !quoted,
             b'\\' if !quoted => i += 1,
             b';' if !quoted => {
-                out.push(&code[start..i]);
+                out.push(code.get(start..i).unwrap_or_default());
                 start = i + 1;
             }
             _ => {}
         }
         i += 1;
     }
-    out.push(&code[start..]);
+    out.push(code.get(start..).unwrap_or_default());
     out
 }
 
@@ -244,8 +244,8 @@ fn format_digits(mut v: f64, toks: &[Tok]) -> String {
     for _ in 0..percents {
         v *= 100.0;
     }
-    let (mantissa, exp_part) = match pattern.find('E') {
-        Some(p) => (&pattern[..p], Some(&pattern[p + 1..])),
+    let (mantissa, exp_part) = match pattern.split_once('E') {
+        Some((m, e)) => (m, Some(e)),
         None => (pattern.as_str(), None),
     };
     // Trailing commas scale by 1000.
@@ -256,10 +256,7 @@ fn format_digits(mut v: f64, toks: &[Tok]) -> String {
             v /= 1000.0;
         }
     }
-    let (int_pat, frac_pat) = match mant.find('.') {
-        Some(p) => (&mant[..p], &mant[p + 1..]),
-        None => (mant.as_str(), ""),
-    };
+    let (int_pat, frac_pat) = mant.split_once('.').unwrap_or((mant.as_str(), ""));
     let grouping = int_pat.contains(',');
     let int_min = int_pat.chars().filter(|&c| c == '0').count();
     let frac_max = frac_pat.chars().filter(|&c| matches!(c, '0' | '#' | '?')).count();
@@ -381,12 +378,12 @@ fn format_date(serial: f64, toks: &[Tok]) -> String {
                     "mm" if minutes => out.push_str(&format!("{:02}", mi)),
                     "m" => out.push_str(&mo.to_string()),
                     "mm" => out.push_str(&format!("{:02}", mo)),
-                    "mmm" => out.push_str(&MONTHS[(mo as usize + 11) % 12][..3]),
-                    "mmmmm" => out.push_str(&MONTHS[(mo as usize + 11) % 12][..1]),
+                    "mmm" => out.push_str(MONTHS[(mo as usize + 11) % 12].get(..3).unwrap_or_default()),
+                    "mmmmm" => out.push_str(MONTHS[(mo as usize + 11) % 12].get(..1).unwrap_or_default()),
                     p if p.starts_with('m') => out.push_str(MONTHS[(mo as usize + 11) % 12]),
                     "d" => out.push_str(&d.to_string()),
                     "dd" => out.push_str(&format!("{:02}", d)),
-                    "ddd" => out.push_str(&DAYS[weekday][..3]),
+                    "ddd" => out.push_str(DAYS[weekday].get(..3).unwrap_or_default()),
                     p if p.starts_with('d') => out.push_str(DAYS[weekday]),
                     p if p.starts_with('h') => {
                         let hh = if has_ampm {

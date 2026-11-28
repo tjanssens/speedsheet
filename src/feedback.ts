@@ -1,6 +1,7 @@
 // Feedback dialog: sends text + app version + OS straight to a GitHub issue through the
 // feedback proxy. Without a proxy (or when it is unreachable) it opens a prefilled issue page.
 import { native, isTauri, errorText, type AppInfo } from "./api";
+import { toast } from "./ui";
 
 const backdrop = document.getElementById("modal-backdrop")!;
 const modal = document.getElementById("modal")!;
@@ -13,13 +14,6 @@ function close() {
 backdrop.addEventListener("mousedown", (e) => {
   if (e.target === backdrop) close();
 });
-
-function toast(html: string, ms = 5000) {
-  const t = document.getElementById("toast")!;
-  t.innerHTML = html;
-  t.hidden = false;
-  window.setTimeout(() => (t.hidden = true), ms);
-}
 
 async function openUrl(url: string) {
   if (isTauri) {
@@ -77,7 +71,7 @@ export function openFeedback(info: AppInfo | null) {
         contact: contact.value.trim() || null,
       });
       close();
-      toast(res?.number ? `Thanks! Your feedback was filed as issue #${res.number}.` : "Thanks! Your feedback was sent.");
+      toast(res?.number ? `Thanks! Your feedback was filed as issue #${res.number}.` : "Thanks! Your feedback was sent.", 5000);
     } catch (e) {
       // Fall back to GitHub's own form, prefilled, so nothing is lost.
       const extra = contact.value.trim() ? `\nContact: ${contact.value.trim()}` : "";

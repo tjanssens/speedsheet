@@ -69,10 +69,14 @@ fn split_num(s: &str) -> Option<(String, f64, String, usize)> {
     let b = s.as_bytes();
     let end = b.iter().rposition(|c| c.is_ascii_digit())? + 1;
     let start = b[..end].iter().rposition(|c| !c.is_ascii_digit()).map(|p| p + 1).unwrap_or(0);
-    let digits = &s[start..end];
+    let digits = s.get(start..end)?;
     let n: f64 = digits.parse().ok()?;
-    let width = if digits.starts_with('0') && digits.len() > 1 { digits.len() } else { 0 };
-    Some((s[..start].to_string(), n, s[end..].to_string(), width))
+    // A leading zero ("08") keeps the width; a lone "0" does not.
+    let width = match digits.as_bytes() {
+        [b'0', _, ..] => digits.len(),
+        _ => 0,
+    };
+    Some((s.get(..start)?.to_string(), n, s.get(end..)?.to_string(), width))
 }
 
 /// Least-squares line through (k, y_k).
@@ -121,22 +125,22 @@ fn detect(src: &[&Cell]) -> Series {
         return Series::Copy;
     }
     // Day and month names.
-    let named: Vec<Option<(usize, i64)>> = texts.iter().map(|t| find_in_lists(t)).collect();
-    if let Some(Some((list, first))) = named.first() {
-        if named.iter().all(|n| n.map(|x| x.0) == Some(*list)) {
-            let step = if named.len() >= 2 { named[1].unwrap().1 - first } else { 1 };
-            let len = LISTS[*list].len() as i64;
-            let consistent = named.windows(2).all(|w| (w[1].unwrap().1 - w[0].unwrap().1 - step).rem_euclid(len) == 0);
+    let named: Vec<(usize, i64)> = texts.iter().map(|t| find_in_lists(t)).collect::<Option<_>>().unwrap_or_default();
+    if let Some(&(list, first)) = named.first() {
+        if named.iter().all(|n| n.0 == list) {
+            let step = named.get(1).map_or(1, |n| n.1 - first);
+            let len = LISTS[list].len() as i64;
+            let consistent = named.windows(2).all(|w| (w[1].1 - w[0].1 - step).rem_euclid(len) == 0);
             if consistent {
-                return Series::Named { list: *list, start: *first, step, case: case_of(texts[0]) };
+                return Series::Named { list, start: first, step, case: case_of(texts[0]) };
             }
         }
     }
     // Text with a number in it: "Item 1", "Q1", "Week 05".
-    let parts: Vec<Option<(String, f64, String, usize)>> = texts.iter().map(|t| split_num(t)).collect();
-    if let Some(Some((prefix, _, suffix, width))) = parts.first() {
-        if parts.iter().all(|p| p.as_ref().is_some_and(|p| &p.0 == prefix && &p.2 == suffix)) {
-            let ys: Vec<f64> = parts.iter().map(|p| p.as_ref().unwrap().1).collect();
+    let parts: Vec<(String, f64, String, usize)> = texts.iter().map(|t| split_num(t)).collect::<Option<_>>().unwrap_or_default();
+    if let Some((prefix, _, suffix, width)) = parts.first() {
+        if parts.iter().all(|p| &p.0 == prefix && &p.2 == suffix) {
+            let ys: Vec<f64> = parts.iter().map(|p| p.1).collect();
             let (a, b) = if ys.len() == 1 { (ys[0], 1.0) } else { linear(&ys) };
             return Series::TextNum { prefix: prefix.clone(), suffix: suffix.clone(), a, b, width: *width };
         }
@@ -215,6 +219,12 @@ mod tests {
         assert_eq!(fill(&["Maandag"], 1..4), ["Dinsdag", "Woensdag", "Donderdag"]);
         assert_eq!(fill(&["sat"], 1..3), ["sun", "mon"]);
         assert_eq!(fill(&["Jan", "Mar"], 2..4), ["May", "Jul"]);
+        assert_eq!(fill(&["Feb", "Apr"], 2..4), ["Jun", "Aug"], "a step counted from a month other than the first");
+        assert_eq!(fill(&["Feb", "Mar", "May"], 3..4), ["Feb"], "uneven steps are copied");
+        assert_eq!(fill(&["A1", "B2"], 2..4), ["A1", "B2"], "different text around the numbers is copied");
+        assert_eq!(fill(&["x1", "x2y"], 2..4), ["x1", "x2y"], "a different suffix too");
+        assert_eq!(fill(&["Item 0"], 1..3), ["Item 1", "Item 2"], "a lone 0 is not zero-padding");
+        assert_eq!(fill(&["Item 9"], 1..2), ["Item 10"]);
         assert_eq!(fill(&["OKT"], 1..4), ["NOV", "DEC", "JAN"]);
         assert_eq!(fill(&["a", "b"], 2..5), ["a", "b", "a"]);
         assert_eq!(fill(&["2026-01-30"], 1..3), ["2026-01-31", "2026-02-01"]);

@@ -40,6 +40,34 @@ jobs:
           name: proptest-regressions-${{ strategy.job-index }}
           path: crates/speedsheet-core/tests/*.proptest-regressions
 
+  ui-fuzz:
+    name: UI fuzz, 3 x 3000 steps
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: awalsh128/cache-apt-pkgs-action@v1.5.3
+        with:
+          packages: libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+          version: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: cargo build -p speedsheet --example dev_bridge
+      - run: npx playwright install --with-deps chromium
+      # Each run picks a new seed and prints it; replay a failure with UI_FUZZ_SEED=<seed>.
+      - run: for i in 1 2 3; do npx playwright test ui-fuzz --trace off || exit 1; done
+        env:
+          UI_FUZZ_STEPS: 3000
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: ui-fuzz-failure
+          path: test-results/
+
   advisories:
     name: New security advisories
     runs-on: ubuntu-latest

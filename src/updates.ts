@@ -1,6 +1,8 @@
 // Update check: quietly on startup, or on demand from the toolbar. Updates come from the
 // latest GitHub release and are verified with the updater signature before installing.
 import { isTauri, errorText, type AppInfo } from "./api";
+import { spawn } from "./ui";
+import type { Update } from "@tauri-apps/plugin-updater";
 
 const banner = () => document.getElementById("update-banner")!;
 
@@ -43,28 +45,29 @@ export async function checkForUpdates(info: AppInfo | null, manual: boolean) {
       {
         label: "Install and restart",
         primary: true,
-        run: async () => {
-          let total = 0;
-          let done = 0;
-          show("Downloading update…");
-          try {
-            await update.downloadAndInstall((ev) => {
-              if (ev.event === "Started") total = ev.data.contentLength ?? 0;
-              if (ev.event === "Progress") {
-                done += ev.data.chunkLength;
-                if (total) show(`Downloading update… ${Math.round((done / total) * 100)}%`);
-              }
-              if (ev.event === "Finished") show("Installing…");
-            });
-            const { relaunch } = await import("@tauri-apps/plugin-process");
-            await relaunch();
-          } catch (e) {
-            show(`Update failed: ${errorText(e)}`, [{ label: "OK", run: hide }]);
-          }
-        },
+        run: () => spawn(install(update)),
       },
     ]);
   } catch (e) {
     if (manual) show(`Couldn't check for updates: ${errorText(e)}`, [{ label: "OK", run: hide }]);
+  }
+}
+
+async function install(update: Update) {
+  const progress = { total: 0, done: 0 };
+  show("Downloading update…");
+  try {
+    await update.downloadAndInstall((ev) => {
+      if (ev.event === "Started") progress.total = ev.data.contentLength ?? 0;
+      if (ev.event === "Progress") {
+        progress.done += ev.data.chunkLength;
+        if (progress.total) show(`Downloading update… ${Math.round((progress.done / progress.total) * 100)}%`);
+      }
+      if (ev.event === "Finished") show("Installing…");
+    });
+    const { relaunch } = await import("@tauri-apps/plugin-process");
+    await relaunch();
+  } catch (e) {
+    show(`Update failed: ${errorText(e)}`, [{ label: "OK", run: hide }]);
   }
 }

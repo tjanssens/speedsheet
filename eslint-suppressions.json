@@ -1,23 +1,2 @@
 {
-  "src/api.ts": {
-    "@typescript-eslint/no-floating-promises": {
-      "count": 1
-    },
-    "@typescript-eslint/no-unsafe-assignment": {
-      "count": 1
-    }
-  },
-  "src/main.ts": {
-    "@typescript-eslint/no-floating-promises": {
-      "count": 63
-    },
-    "@typescript-eslint/no-misused-promises": {
-      "count": 5
-    }
-  },
-  "src/updates.ts": {
-    "@typescript-eslint/no-misused-promises": {
-      "count": 1
-    }
-  }
 }

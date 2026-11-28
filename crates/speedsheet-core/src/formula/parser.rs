@@ -82,6 +82,12 @@ pub enum Expr {
 
 pub type ParseError = String;
 
+/// `src[a..b]`, or "" when that is not a valid range. Positions come from the lexer, so they are
+/// character boundaries; this keeps a lexer bug from becoming a crash.
+fn sub(src: &str, a: usize, b: usize) -> &str {
+    src.get(a..b).unwrap_or_default()
+}
+
 fn parse_cell_ref(s: &str) -> Option<RefPart> {
     let b = s.as_bytes();
     let mut i = 0;
@@ -93,7 +99,7 @@ fn parse_cell_ref(s: &str) -> Option<RefPart> {
     while i < b.len() && b[i].is_ascii_alphabetic() {
         i += 1;
     }
-    let letters = &s[cs..i];
+    let letters = s.get(cs..i)?;
     let abs_row = b.get(i) == Some(&b'$');
     if abs_row {
         i += 1;
@@ -106,7 +112,7 @@ fn parse_cell_ref(s: &str) -> Option<RefPart> {
         return None;
     }
     let col = col_index(letters)?;
-    let row: usize = s[rs..].parse().ok()?;
+    let row: usize = s.get(rs..)?.parse().ok()?;
     if row == 0 || row > MAX_ROWS {
         return None;
     }
@@ -182,7 +188,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
         }
         // Error literals
         if c == '#' {
-            let rest = &src[start..];
+            let rest = src.get(start..).unwrap_or_default();
             let mut found = None;
             for e in ["#DIV/0!", "#N/A", "#NAME?", "#NULL!", "#NUM!", "#REF!", "#VALUE!", "#CYCLE!"] {
                 if rest.get(..e.len()).is_some_and(|p| p.eq_ignore_ascii_case(e)) {
@@ -195,7 +201,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
             while i < n && chars[i].0 < end {
                 i += 1;
             }
-            out.push(Token { tok: Tok::Err(CellError::parse(e).unwrap()), start, end });
+            out.push(Token { tok: Tok::Err(CellError::parse(e).ok_or("unknown error literal")?), start, end });
             continue;
         }
         // Quoted sheet name: 'My Sheet'!A1
@@ -236,12 +242,12 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
             }
             // Row range?
             if j < n && chars[j].1 == ':' {
-                let a = &src[start..pos(j)];
+                let a = sub(src, start, pos(j));
                 let mut k = j + 1;
                 while k < n && (chars[k].1.is_ascii_digit() || chars[k].1 == '$') {
                     k += 1;
                 }
-                if let (Some(pa), Some(pb)) = (parse_row_ref(a), parse_row_ref(&src[pos(j + 1)..pos(k)])) {
+                if let (Some(pa), Some(pb)) = (parse_row_ref(a), parse_row_ref(sub(src, pos(j + 1), pos(k)))) {
                     out.push(Token { tok: Tok::Ref(RefTok { sheet: None, a: pa, b: Some(pb) }), start, end: pos(k) });
                     i = k;
                     continue;
@@ -259,7 +265,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
                     j = k;
                 }
             }
-            let text = &src[start..pos(j)];
+            let text = sub(src, start, pos(j));
             let v: f64 = text.parse().map_err(|_| format!("bad number {text}"))?;
             out.push(Token { tok: Tok::Num(v), start, end: pos(j) });
             i = j;
@@ -270,7 +276,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
             while j < n && is_word_char(chars[j].1) {
                 j += 1;
             }
-            let word = &src[start..pos(j)];
+            let word = sub(src, start, pos(j));
             // Sheet prefix
             if j < n && chars[j].1 == '!' {
                 let (r, ni) = lex_ref_after_sheet(src, &chars, j + 1, Some(Arc::from(word)))?;
@@ -363,13 +369,13 @@ fn lex_ref_after_sheet(
         (s, j)
     };
     let (s, j) = read_part(i);
-    let first = &src[pos(s)..pos(j)];
+    let first = sub(src, pos(s), pos(j));
     let a_cell = parse_cell_ref(first);
     let a_col = parse_col_ref(first);
     let a_row = parse_row_ref(first);
     if j < n && chars[j].1 == ':' {
         let (s2, j2) = read_part(j + 1);
-        let second = &src[pos(s2)..pos(j2)];
+        let second = sub(src, pos(s2), pos(j2));
         let pair = match (a_cell, a_col, a_row) {
             (Some(a), _, _) => parse_cell_ref(second).map(|b| (a, b)),
             (_, Some(a), _) => parse_col_ref(second).map(|b| (a, b)),
@@ -630,7 +636,7 @@ pub fn shift_formula(src: &str, dr: i64, dc: i64) -> String {
     let mut last = 0;
     for t in &toks {
         if let Tok::Ref(r) = &t.tok {
-            out.push_str(&src[last..t.start]);
+            out.push_str(sub(src, last, t.start));
             let a = shift_part(&r.a, dr, dc);
             let b = r.b.as_ref().map(|b| shift_part(b, dr, dc));
             match (a, b) {
@@ -653,7 +659,7 @@ pub fn shift_formula(src: &str, dr: i64, dc: i64) -> String {
             last = t.end;
         }
     }
-    out.push_str(&src[last..]);
+    out.push_str(src.get(last..).unwrap_or_default());
     out
 }
 
@@ -671,17 +677,17 @@ pub fn rename_sheet_in_formula(src: &str, from: &str, to: &str) -> Option<String
         if !r.sheet.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(from)) {
             continue;
         }
-        let text = &src[t.start..t.end];
-        let Some(bang) = text.rfind('!') else { continue };
-        out.push_str(&src[last..t.start]);
+        let text = sub(src, t.start, t.end);
+        let Some((_, after)) = text.rsplit_once('!') else { continue };
+        out.push_str(sub(src, last, t.start));
         out.push_str(&sheet_prefix(to));
-        out.push_str(&text[bang + 1..]);
+        out.push_str(after);
         last = t.end;
     }
     if last == 0 {
         return None;
     }
-    out.push_str(&src[last..]);
+    out.push_str(src.get(last..).unwrap_or_default());
     Some(out)
 }
 

@@ -2,14 +2,14 @@
 import type { FilterCond } from "./api";
 
 const pop = document.getElementById("popover")!;
-let onClose: (() => void) | null = null;
+const state = { onClose: null as (() => void) | null };
 
 export function closePopover() {
   if (pop.hidden) return;
   pop.hidden = true;
   pop.innerHTML = "";
-  const cb = onClose;
-  onClose = null;
+  const cb = state.onClose;
+  state.onClose = null;
   cb?.();
 }
 
@@ -64,7 +64,7 @@ export function openMenu(x: number, y: number, items: MenuItem[]) {
     };
     pop.append(b);
   }
-  onClose = () => {
+  state.onClose = () => {
     pop.style.width = "";
     pop.style.gap = "";
     pop.style.padding = "";
