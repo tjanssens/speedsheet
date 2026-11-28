@@ -34,7 +34,7 @@ jobs:
     env:
       TZ: ${{ matrix.tz }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p speedsheet-core
@@ -56,7 +56,7 @@ jobs:
     name: Lint, types, UI unit tests, build
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -64,11 +64,11 @@ jobs:
       - name: Versions agree (package.json, Cargo.toml, tauri.conf.json)
         run: scripts/check-versions.sh
       - uses: Swatinem/rust-cache@v2
-      - uses: awalsh128/cache-apt-pkgs-action@v1.5.3
+      - uses: awalsh128/cache-apt-pkgs-action@v2.0.0
         with:
           packages: ${{ env.TAURI_LINUX_DEPS }}
           version: 1
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -84,27 +84,27 @@ jobs:
     name: UI tests (browser)
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: awalsh128/cache-apt-pkgs-action@v1.5.3
+      - uses: awalsh128/cache-apt-pkgs-action@v2.0.0
         with:
           packages: ${{ env.TAURI_LINUX_DEPS }}
           version: 1
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
       - run: npm ci
       - name: Build the dev bridge
         run: cargo build -p speedsheet --example dev_bridge
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ hashFiles('package-lock.json') }}
       - run: npx playwright install --with-deps chromium
       - run: npx playwright test
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: ui-smoke
@@ -113,7 +113,7 @@ jobs:
             playwright-report/
           retention-days: 7
       # Look at UI changes instead of reading canvas code: light and dark screenshots per PR.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: ui-screens
@@ -124,7 +124,7 @@ jobs:
     name: Coverage (core)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
@@ -143,7 +143,7 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
@@ -175,7 +175,7 @@ jobs:
     name: Performance (500k rows, budgets and vs main)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
@@ -204,9 +204,9 @@ jobs:
     name: Dependencies (vulnerabilities, licenses)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       # Only what ships in the app; dev tools run on the developer's machine only.
